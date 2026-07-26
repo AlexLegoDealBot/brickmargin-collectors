@@ -43,6 +43,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          REBRICKABLE_API_KEY: ${{ secrets.REBRICKABLE_API_KEY }}
+          # Optional. If this secret doesn't exist it arrives empty and the
+          # collector skips enrichment instead of failing.
           BRICKSET_API_KEY: ${{ secrets.BRICKSET_API_KEY }}
           # On the weekly schedule these inputs don't exist, so fall back
           # to defaults: full load, no probe.
