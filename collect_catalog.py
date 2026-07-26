@@ -37,6 +37,10 @@ from datetime import date, datetime, timezone
 import requests
 from supabase import create_client
 
+# Bump this on every edit. It prints in the log so you can confirm at a
+# glance which version of the file actually ran.
+VERSION = "2.0-rebrickable-primary"
+
 REBRICKABLE_BASE = "https://rebrickable.com/api/v3/lego"
 BRICKSET_BASE = "https://brickset.com/api/v3.asmx"
 
@@ -267,7 +271,7 @@ def upsert(client, rows, label):
 # ----------------------------------------------------------------------
 
 def main():
-    log("BrickMargin catalog collector starting")
+    log(f"BrickMargin catalog collector starting — version {VERSION}")
     log(f"Years {MIN_YEAR}-{MAX_YEAR}" + ("  [PROBE MODE — no writes]" if PROBE else ""))
 
     client = None if PROBE else create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
