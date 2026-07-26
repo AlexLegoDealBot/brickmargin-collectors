@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "1.3-negation-aware"
+VERSION = "1.4-recent-first"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -325,12 +325,21 @@ def summarize(items, set_num):
 
 def pick_stale_sets(client, limit):
     """
-    Oldest-checked sets first, never-checked ahead of those. This is what
-    makes the rotation work within the daily call budget.
+    Oldest-checked sets first, never-checked ahead of those — that's what makes
+    rotation work inside the daily call budget.
+
+    Newest releases break the tie. A deal only exists for a set you can still
+    buy at retail, so comps on current sets are worth more to the deal board
+    than comps on sets that retired years ago. Without this the queue runs in
+    set-number order and spends its first days on retired inventory.
+
+    Expect a higher "too thin" rate on very new sets — a set still on shelves
+    has little resale market yet. That absence is itself useful signal.
     """
     resp = (client.table("sets")
-            .select("set_num,name,comps_last_checked_at")
+            .select("set_num,name,year_released,comps_last_checked_at")
             .order("comps_last_checked_at", desc=False, nullsfirst=True)
+            .order("year_released", desc=True, nullsfirst=False)
             .limit(limit)
             .execute())
     return resp.data or []
@@ -397,7 +406,7 @@ def main():
         attempted.append(set_num)
 
         if PROBE:
-            log(f"  --- {set_num} · {s.get('name')} ---")
+            log(f"  --- {set_num} · {s.get('name')} ({s.get('year_released')}) ---")
             log(f"      eBay returned {len(items)}, kept {kept} after filtering")
             for verdict, price, title in sample:
                 if verdict == "dist":
