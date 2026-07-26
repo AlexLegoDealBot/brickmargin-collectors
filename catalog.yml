@@ -1,0 +1,52 @@
+name: Catalog Collector
+
+# Three ways this runs:
+#   1. You click "Run workflow" in the Actions tab (manual)
+#   2. Every Monday at 9am UTC (automatic refresh)
+#   3. Never automatically on push — collectors shouldn't fire on code edits
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe mode — print sample data, write nothing to the database'
+        type: boolean
+        default: true
+      min_year:
+        description: 'Earliest release year to load'
+        default: '2015'
+      max_year:
+        description: 'Latest release year to load (blank = next year)'
+        default: ''
+  schedule:
+    - cron: '0 9 * * 1'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the catalog collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BRICKSET_API_KEY: ${{ secrets.BRICKSET_API_KEY }}
+          # On the weekly schedule these inputs don't exist, so fall back
+          # to defaults: full load, no probe.
+          PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
+          MIN_YEAR: ${{ github.event.inputs.min_year || '2015' }}
+          MAX_YEAR: ${{ github.event.inputs.max_year || '' }}
+        run: python collect_catalog.py
