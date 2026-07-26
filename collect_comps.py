@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "1.1-ebay-active"
+VERSION = "1.3-negation-aware"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -60,11 +60,44 @@ UPSERT_BATCH = 100
 # Titles containing any of these are not the sealed set we're pricing.
 # Kept deliberately conservative — over-filtering silently starves the median.
 JUNK_TERMS = (
+    # Not the product at all
     "instruction", "manual", "sticker", "empty box", "box only", "no box",
     "replacement", "custom", "bootleg", "knock off", "knockoff", "not lego",
     "compatible", "minifig only", "minifigure only", "figure only",
     "poster", "catalog", "magazine", "display case", "light kit",
     "incomplete", "parts only", "spare",
+    # Third-party builds sold under the set's number
+    "display build", "display model",
+    # OPENED OR USED, despite the seller marking it NEW. eBay's condition
+    # filter is self-reported and routinely wrong; these phrases are how
+    # used sets actually describe themselves.
+    #   "100% complete" is used-set language — sealed sets say NISB/sealed
+    #   "bagged" means loose polybags, no sealed box, and prices lower
+    #   "displayed" means it was built and put on a shelf
+    "100% complete", "100 % complete", "complete set displayed",
+    "bagged", "resealed", "re-sealed",
+    "displayed", "display only", "on display",
+    "pre-owned", "preowned", "pre owned", "used",
+    "open box", "opened", "missing",
+)
+
+# Some junk terms invert when negated: "never opened" and "unopened" both
+# contain "opened" but mean the set IS sealed. Without this, the filter
+# throws away exactly the listings it should trust most.
+NEGATIONS = {
+    "opened":    ("never opened", "unopened", "not opened", "un-opened"),
+    "used":      ("unused", "never used", "un-used"),
+    "displayed": ("never displayed", "not displayed"),
+    "missing":   ("no missing", "nothing missing", "not missing"),
+    "open box":  ("never open box",),
+}
+
+# Positive sealed indicators, used only when STRICT_SEALED is on. Requiring
+# one of these is a much tighter gate than excluding bad phrases, but it also
+# drops honest listings whose title just says "New". Toggle and compare.
+SEALED_TERMS = (
+    "sealed", "nisb", "nib", "new in box", "brand new", "factory sealed",
+    "unopened", "misb", "never opened", "never built",
 )
 
 
@@ -95,6 +128,7 @@ EBAY_CERT_ID = require("EBAY_CERT_ID")
 
 BATCH_SIZE = int_env("BATCH_SIZE", 400)
 MIN_LISTINGS = int_env("MIN_LISTINGS", 3)
+STRICT_SEALED = os.environ.get("STRICT_SEALED", "").strip().lower() in ("1", "true", "yes")
 PROBE = os.environ.get("PROBE", "").strip().lower() in ("1", "true", "yes")
 
 
@@ -176,13 +210,29 @@ def search_listings(token, set_num):
 
 def is_relevant(title, num):
     """
-    Two gates. The set number must appear in the title — the single strongest
-    signal we have that this listing is the right product. And no junk terms.
+    Gates, in order. Returns (keep: bool, reason: str) so the probe output can
+    show exactly why something was excluded.
+
+      1. The set number must appear in the title — the strongest signal we have
+         that this listing is the right product.
+      2. No junk terms (wrong product, third-party build, or used/opened).
+      3. If STRICT_SEALED, the title must positively assert sealed condition.
     """
     low = title.lower()
+
     if num not in low:
-        return False
-    return not any(term in low for term in JUNK_TERMS)
+        return False, "wrong set"
+
+    for term in JUNK_TERMS:
+        if term in low:
+            if any(neg in low for neg in NEGATIONS.get(term, ())):
+                continue          # negated — means the opposite, keep going
+            return False, f"'{term}'"
+
+    if STRICT_SEALED and not any(t in low for t in SEALED_TERMS):
+        return False, "not asserted sealed"
+
+    return True, "ok"
 
 
 def summarize(items, set_num):
@@ -206,9 +256,10 @@ def summarize(items, set_num):
         if price <= 0:
             continue
 
-        keep = is_relevant(title, num)
-        if len(sample) < 5:
-            sample.append(("KEEP" if keep else "drop", round(price, 2), title[:70]))
+        keep, reason = is_relevant(title, num)
+        if len(sample) < 8:
+            sample.append(("KEEP" if keep else f"drop {reason}",
+                           round(price, 2), title[:64]))
         if keep:
             prices.append(price)
 
@@ -240,6 +291,17 @@ def summarize(items, set_num):
 
     if outliers:
         sample.append(("trim", outliers, f"{outliers} implausible price(s) excluded"))
+
+    # Full distribution of what fed the median. Five sample titles can't tell
+    # you whether a median is sane; the shape of all of them can.
+    if len(trimmed) >= 4:
+        q = statistics.quantiles(trimmed, n=4)
+        dist = (f"min ${trimmed[0]:,.0f} | p25 ${q[0]:,.0f} | med ${median:,.0f} "
+                f"| p75 ${q[2]:,.0f} | max ${trimmed[-1]:,.0f}  (n={len(trimmed)})")
+    else:
+        dist = (f"min ${trimmed[0]:,.0f} | med ${median:,.0f} "
+                f"| max ${trimmed[-1]:,.0f}  (n={len(trimmed)})")
+    sample.append(("dist", 0, dist))
 
     row = {
         "set_num": set_num,
@@ -303,7 +365,8 @@ def mark_checked(client, set_nums):
 
 def main():
     log(f"BrickMargin eBay comps collector — version {VERSION}")
-    log(f"Batch {BATCH_SIZE}, min listings {MIN_LISTINGS}"
+    log(f"Batch {BATCH_SIZE}, min listings {MIN_LISTINGS}, "
+        f"strict_sealed={'ON' if STRICT_SEALED else 'off'}"
         + ("  [PROBE MODE — no writes]" if PROBE else ""))
 
     client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -337,8 +400,17 @@ def main():
             log(f"  --- {set_num} · {s.get('name')} ---")
             log(f"      eBay returned {len(items)}, kept {kept} after filtering")
             for verdict, price, title in sample:
-                log(f"      [{verdict:4}] ${price:>9,.2f}  {title}")
-            log(f"      -> {row if row else 'nothing recorded (too few listings)'}")
+                if verdict == "dist":
+                    log(f"      DISTRIBUTION: {title}")
+                elif verdict == "trim":
+                    log(f"      TRIMMED: {title}")
+                else:
+                    log(f"      [{verdict:22}] ${price:>9,.2f}  {title}")
+            if row:
+                log(f"      -> median ${row['median_sold']:,.2f}  "
+                    f"spread ${row['spread']:,.2f}  n={row['comp_count']}")
+            else:
+                log("      -> nothing recorded (too few listings)")
             continue
 
         if row:

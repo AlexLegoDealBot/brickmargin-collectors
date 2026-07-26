@@ -17,6 +17,10 @@ on:
       min_listings:
         description: 'Minimum surviving listings before a comp is recorded'
         default: '3'
+      strict_sealed:
+        description: 'Strict sealed — require the title to positively say sealed/NISB'
+        type: boolean
+        default: false
   schedule:
     # Every 6 hours. Staggered off the hour to avoid peak API contention.
     - cron: '20 2,8,14,20 * * *'
@@ -49,4 +53,5 @@ jobs:
           PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '400' }}
           MIN_LISTINGS: ${{ github.event.inputs.min_listings || '3' }}
+          STRICT_SEALED: ${{ github.event.inputs.strict_sealed == 'true' && '1' || '' }}
         run: python collect_comps.py
