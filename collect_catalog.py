@@ -39,7 +39,7 @@ from supabase import create_client
 
 # Bump this on every edit. It prints in the log so you can confirm at a
 # glance which version of the file actually ran.
-VERSION = "2.0-rebrickable-primary"
+VERSION = "2.1-filtered"
 
 REBRICKABLE_BASE = "https://rebrickable.com/api/v3/lego"
 BRICKSET_BASE = "https://brickset.com/api/v3.asmx"
@@ -74,6 +74,14 @@ SUPABASE_URL = require("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = require("SUPABASE_SERVICE_KEY")
 REBRICKABLE_API_KEY = require("REBRICKABLE_API_KEY")
 BRICKSET_API_KEY = os.environ.get("BRICKSET_API_KEY", "").strip()
+
+# Rebrickable's catalog is a completist parts database: it includes books,
+# magazines, keychains and gear alongside real sets. A deal tracker wants
+# buildable sets that retailers actually discount, so we filter.
+#   MIN_PARTS      — drop anything under this piece count (books have 1)
+#   EXCLUDED_ROOTS — theme trees that are definitionally not buildable sets
+MIN_PARTS = int_env("MIN_PARTS", 20)
+EXCLUDED_ROOTS = {"Books", "Gear"}
 
 MIN_YEAR = int_env("MIN_YEAR", 2015)
 MAX_YEAR = int_env("MAX_YEAR", date.today().year + 1)
@@ -151,11 +159,24 @@ def fetch_themes():
 
 
 def transform_rb(s, themes):
+    """
+    Returns (row, None) on success, or (None, reason) when filtered out.
+    The reason strings feed the summary counts so the filters are visible
+    rather than silently discarding data.
+    """
     set_num = (s.get("set_num") or "").strip()
     if not set_num:
-        return None
+        return None, "no set_num"
 
     theme_info = themes.get(s.get("theme_id"), {})
+    root = theme_info.get("theme")
+
+    if root in EXCLUDED_ROOTS:
+        return None, f"theme:{root}"
+
+    pieces = positive_int(s.get("num_parts"))
+    if pieces is None or pieces < MIN_PARTS:
+        return None, "too few pieces"
 
     return {
         "set_num": set_num,
@@ -163,10 +184,10 @@ def transform_rb(s, themes):
         "theme": theme_info.get("theme"),
         "subtheme": theme_info.get("subtheme"),
         "year_released": positive_int(s.get("year")),
-        "pieces": positive_int(s.get("num_parts")),
+        "pieces": pieces,
         "image_url": s.get("set_img_url"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    }, None
 
 
 # ----------------------------------------------------------------------
@@ -281,6 +302,7 @@ def main():
     themes = fetch_themes()
 
     rb_rows = {}
+    dropped = {}
     page = 1
     while True:
         data = rb_get("/sets/", {
@@ -292,21 +314,37 @@ def main():
         if page == 1:
             log(f"  {data.get('count', 0)} sets reported for {MIN_YEAR}-{MAX_YEAR}")
             if PROBE and results:
-                log("  --- raw Rebrickable record ---")
-                print(json.dumps(results[0], indent=2), flush=True)
-                log("  --- our transformed row ---")
-                print(json.dumps(transform_rb(results[0], themes), indent=2), flush=True)
+                # Show a record that survives the filters, not just the
+                # alphabetically-first one (which is usually a book).
+                sample = None
+                for s in results:
+                    row, _ = transform_rb(s, themes)
+                    if row:
+                        sample = (s, row)
+                        break
+                if sample:
+                    log("  --- raw Rebrickable record (post-filter) ---")
+                    print(json.dumps(sample[0], indent=2), flush=True)
+                    log("  --- our transformed row ---")
+                    print(json.dumps(sample[1], indent=2), flush=True)
 
         for s in results:
-            row = transform_rb(s, themes)
+            row, reason = transform_rb(s, themes)
             if row:
                 rb_rows[row["set_num"]] = row
+            else:
+                dropped[reason] = dropped.get(reason, 0) + 1
 
-        log(f"  page {page}: {len(rb_rows)} sets collected so far")
+        log(f"  page {page}: {len(rb_rows)} kept, {sum(dropped.values())} filtered")
         if not data.get("next"):
             break
         page += 1
         time.sleep(SLEEP)
+
+    log(f"  FILTERS: kept {len(rb_rows)}, dropped {sum(dropped.values())}")
+    for reason, count in sorted(dropped.items(), key=lambda x: -x[1]):
+        log(f"    {count:6}  {reason}")
+    log(f"  (MIN_PARTS={MIN_PARTS}, excluded themes: {', '.join(sorted(EXCLUDED_ROOTS))})")
 
     if not PROBE:
         upsert(client, list(rb_rows.values()), "catalog")

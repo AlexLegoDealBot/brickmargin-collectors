@@ -15,6 +15,9 @@ on:
       min_year:
         description: 'Earliest release year to load'
         default: '2015'
+      min_parts:
+        description: 'Minimum piece count (filters out books, keychains, gear)'
+        default: '20'
       max_year:
         description: 'Latest release year to load (blank = next year)'
         default: ''
@@ -51,5 +54,6 @@ jobs:
           # to defaults: full load, no probe.
           PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
           MIN_YEAR: ${{ github.event.inputs.min_year || '2015' }}
+          MIN_PARTS: ${{ github.event.inputs.min_parts || '20' }}
           MAX_YEAR: ${{ github.event.inputs.max_year || '' }}
         run: python collect_catalog.py
