@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "1.4-recent-first"
+VERSION = "1.5-numeric-only"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -178,6 +178,16 @@ def get_token():
 def base_number(set_num):
     """'75192-1' -> '75192'. eBay listings use the plain set number."""
     return set_num.split("-")[0].strip()
+
+
+def is_searchable(set_num):
+    """
+    Real set numbers are numeric. The catalog also holds identifiers like
+    'TROPHY-1', which would search eBay for "LEGO TROPHY" and match every
+    trophy ever listed — producing a confident-looking median built entirely
+    on the wrong product. Skip them rather than record fiction.
+    """
+    return base_number(set_num).isdigit()
 
 
 def search_listings(token, set_num):
@@ -391,8 +401,17 @@ def main():
     too_thin = 0
     failed = 0
 
+    skipped = 0
+
     for i, s in enumerate(targets, 1):
         set_num = s["set_num"]
+
+        if not is_searchable(set_num):
+            # Stamp it so the rotation moves past it instead of retrying.
+            attempted.append(set_num)
+            skipped += 1
+            continue
+
         items = search_listings(token, set_num)
 
         if items == "RATE_LIMIT":
@@ -443,7 +462,7 @@ def main():
 
     log("=" * 50)
     log(f"Done. Attempted {len(attempted)}, wrote {written} comps, "
-        f"{too_thin} too thin, {failed} errors.")
+        f"{too_thin} too thin, {skipped} non-numeric skipped, {failed} errors.")
     log(f"API calls used this run: ~{len(attempted) + 1}")
 
 
