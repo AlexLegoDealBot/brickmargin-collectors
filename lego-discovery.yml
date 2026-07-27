@@ -1,0 +1,47 @@
+name: LEGO Discovery
+
+# Maps our set numbers to LEGO.com product URLs by reading their published
+# sitemaps. Populates `listings`, which the price collector then polls.
+#
+# Weekly is plenty — LEGO's catalog changes when sets launch or retire, not
+# hourly. Prices move fast; the list of what EXISTS does not.
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe mode — show what was found, write nothing'
+        type: boolean
+        default: true
+      locale:
+        description: 'LEGO.com locale segment to match'
+        default: 'en-us'
+  schedule:
+    # Mondays, after the catalog collector has refreshed the set list.
+    - cron: '40 9 * * 1'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Discover LEGO.com listings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
+          LEGO_LOCALE: ${{ github.event.inputs.locale || 'en-us' }}
+        run: python discover_lego.py
