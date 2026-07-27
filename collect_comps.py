@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "1.5-numeric-only"
+VERSION = "1.6-single-unit"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -68,6 +68,12 @@ JUNK_TERMS = (
     "incomplete", "parts only", "spare",
     # Third-party builds sold under the set's number
     "display build", "display model",
+    # MULTI-UNIT LISTINGS. "Lot of 2" at $25.75 against a $13 median is two
+    # sets priced as one data point, and it drags every median it touches
+    # upward. We want the price of one sealed copy.
+    "lot of", "bundle", "2-pack", "2 pack", "3-pack", "3 pack",
+    "4-pack", "4 pack", "set of 2", "set of 3", "set of 4",
+    "multipack", "multi-pack", "job lot",
     # OPENED OR USED, despite the seller marking it NEW. eBay's condition
     # filter is self-reported and routinely wrong; these phrases are how
     # used sets actually describe themselves.
