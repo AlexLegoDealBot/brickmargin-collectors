@@ -1,0 +1,59 @@
+name: Comps Collector
+
+# Rotates through the catalog gathering eBay resale prices.
+# eBay allows 5,000 Browse calls/day. Four runs x 400 sets = 1,600/day,
+# so the full ~6,700-set catalog cycles about every 4 days with headroom.
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe mode — show 5 sets in detail, write nothing'
+        type: boolean
+        default: true
+      batch_size:
+        description: 'Sets to process this run'
+        default: '400'
+      min_listings:
+        description: 'Minimum surviving listings before a comp is recorded'
+        default: '3'
+      strict_sealed:
+        description: 'Strict sealed — require the title to positively say sealed/NISB'
+        type: boolean
+        default: false
+  schedule:
+    # Every 3 hours — 8 runs a day at 400 sets is 3,200 calls against eBay's
+    # 5,000/day ceiling, so a full catalog cycle lands in about 2 days instead
+    # of 4. Staggered off the hour to avoid peak API contention.
+    - cron: '20 1,4,7,10,13,16,19,22 * * *'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the comps collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          # Scheduled runs get no inputs, so these fall back to full defaults.
+          PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '400' }}
+          MIN_LISTINGS: ${{ github.event.inputs.min_listings || '3' }}
+          STRICT_SEALED: ${{ github.event.inputs.strict_sealed == 'true' && '1' || '' }}
+        run: python collect_comps.py
