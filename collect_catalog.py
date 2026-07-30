@@ -39,7 +39,7 @@ from supabase import create_client
 
 # Bump this on every edit. It prints in the log so you can confirm at a
 # glance which version of the file actually ran.
-VERSION = "2.1-filtered"
+VERSION = "2.2-enrich-merge"
 
 REBRICKABLE_BASE = "https://rebrickable.com/api/v3/lego"
 BRICKSET_BASE = "https://brickset.com/api/v3.asmx"
@@ -376,10 +376,16 @@ def main():
 
                 for s in sets:
                     row = transform_brickset(s)
-                    # Only enrich sets Rebrickable already gave us, so we
-                    # never insert a half-empty row.
+                    # Only enrich sets Rebrickable already gave us.
                     if row and row["set_num"] in rb_rows:
-                        year_rows[row["set_num"]] = row
+                        # Postgres builds the candidate row and checks NOT NULL
+                        # *before* it detects the conflict, so a payload of just
+                        # {set_num, msrp, minifigs} trips "null value in column
+                        # name" even though the set already exists and would
+                        # only have been updated. Merging the catalog row in
+                        # gives the insert path every column it needs; the
+                        # conflict path then updates as intended.
+                        year_rows[row["set_num"]] = {**rb_rows[row["set_num"]], **row}
 
                 if len(sets) < BRICKSET_PAGE_SIZE:
                     break
@@ -387,7 +393,12 @@ def main():
                 time.sleep(SLEEP)
 
             if year_rows and not PROBE:
-                enriched += upsert(client, list(year_rows.values()), f"{year} enrich")
+                # One bad year shouldn't cost the whole run — the catalog is
+                # already written by this point.
+                try:
+                    enriched += upsert(client, list(year_rows.values()), f"{year} enrich")
+                except Exception as exc:
+                    log(f"  {year} enrich failed, continuing: {exc}")
             if stop_year:
                 break
             time.sleep(SLEEP)
