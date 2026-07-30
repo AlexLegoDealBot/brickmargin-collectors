@@ -22,8 +22,10 @@ on:
         type: boolean
         default: false
   schedule:
-    # Every 6 hours. Staggered off the hour to avoid peak API contention.
-    - cron: '20 2,8,14,20 * * *'
+    # Every 3 hours — 8 runs a day at 400 sets is 3,200 calls against eBay's
+    # 5,000/day ceiling, so a full catalog cycle lands in about 2 days instead
+    # of 4. Staggered off the hour to avoid peak API contention.
+    - cron: '20 1,4,7,10,13,16,19,22 * * *'
 
 jobs:
   collect:
