@@ -16,7 +16,13 @@ on:
         default: '20'
       max_discount:
         description: 'Reject anything cheaper than this % below value (junk guard)'
-        default: '70'
+        default: '55'
+      min_feedback:
+        description: 'Minimum seller feedback percentage'
+        default: '97'
+      min_feedback_count:
+        description: 'Minimum number of seller sales'
+        default: '50'
       max_sets:
         description: 'How many sets to scan'
         default: '300'
@@ -43,6 +49,8 @@ jobs:
           PROBE: ${{ github.event.inputs.probe || 'false' }}
           MIN_DISCOUNT: ${{ github.event.inputs.min_discount || '15' }}
           MIN_MARGIN: ${{ github.event.inputs.min_margin || '20' }}
-          MAX_DISCOUNT: ${{ github.event.inputs.max_discount || '70' }}
+          MAX_DISCOUNT: ${{ github.event.inputs.max_discount || '55' }}
+          MIN_FEEDBACK: ${{ github.event.inputs.min_feedback || '97' }}
+          MIN_FEEDBACK_COUNT: ${{ github.event.inputs.min_feedback_count || '50' }}
           MAX_SETS: ${{ github.event.inputs.max_sets || '300' }}
         run: python collect_deals.py
