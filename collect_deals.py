@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.2-trust"
+VERSION = "1.3-confident"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -90,6 +90,9 @@ MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
 # doubt. We are sending real people to spend real money.
 MIN_FEEDBACK = num_env("MIN_FEEDBACK", 97)
 MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 50))
+# A deal is a gap between a listing and OUR value — so a wrong value invents
+# a deal that never existed. Only sets we're confident about qualify.
+MIN_COMPS = int(num_env("MIN_COMPS", 5))
 US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
 MIN_MARGIN = num_env("MIN_MARGIN", 20)
 MAX_SETS = int(num_env("MAX_SETS", 300))
@@ -326,14 +329,17 @@ def main():
     # Scan the sets worth scanning: priced, plausible, and expensive enough
     # that postage doesn't eat the whole margin.
     resp = (client.table("set_values")
-            .select("set_num,name,market_value")
+            .select("set_num,name,market_value,comp_count,confidence")
             .eq("plausible", True)
+            .in_("confidence", ["high", "medium"])
+            .gte("comp_count", MIN_COMPS)
             .gte("market_value", MIN_VALUE)
             .order("market_value", desc=True)
             .limit(MAX_SETS)
             .execute())
     sets = resp.data or []
-    log(f"  scanning {len(sets)} sets")
+    log(f"  scanning {len(sets)} sets (confidence high/medium, "
+        f">={MIN_COMPS} listings behind each value)")
 
     token = get_token()
     found, scanned = [], 0
