@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.1-sanity"
+VERSION = "1.2-trust"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -80,9 +80,17 @@ MIN_DISCOUNT = num_env("MIN_DISCOUNT", 15)
 # $6 — a listing that cheap is a minifigure, a manual or an empty box that
 # happens to mention the number. Anything below (100 - MAX_DISCOUNT)% of
 # value is rejected as not-the-set rather than celebrated as a bargain.
-MAX_DISCOUNT = num_env("MAX_DISCOUNT", 70)
+# 70% was still generous enough to admit scam bait. A genuine underpriced
+# set is usually 15-55% under market; below that, the listing is lying.
+MAX_DISCOUNT = num_env("MAX_DISCOUNT", 55)
 MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
-MIN_FEEDBACK = num_env("MIN_FEEDBACK", 90)
+# Feedback percentage alone means nothing — 100% from two sales is riskier
+# than 98% from five thousand. Both gates must pass, and a seller with no
+# feedback history at all is rejected rather than given the benefit of the
+# doubt. We are sending real people to spend real money.
+MIN_FEEDBACK = num_env("MIN_FEEDBACK", 97)
+MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 50))
+US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
 MIN_MARGIN = num_env("MIN_MARGIN", 20)
 MAX_SETS = int(num_env("MAX_SETS", 300))
 MIN_VALUE = num_env("MIN_VALUE", 60)
@@ -157,6 +165,10 @@ JUNK = (
     "magnet", "pen", "shirt", "mug", "custom", "compatible", "knock",
     "knockoff", "moc", "lot of", "bundle", "job lot", "choose", "pick your",
     "you pick", "select", "assorted", "random",
+    # Knock-off sellers rarely say "fake" — they say these instead.
+    "generic", "unbranded", "aftermarket", "replica", "clone", "third party",
+    "compatible with", "fits lego", "lego style", "building blocks",
+    "block set", "not lego", "no logo", "brick set compatible", "oem",
 )
 
 
@@ -253,15 +265,28 @@ def evaluate(item, set_row):
     if discount > MAX_DISCOUNT:
         return None          # too good to be the set — it isn't the set
 
-    seller_pct = None
+    # --- who is selling it -------------------------------------------------
     seller_node = item.get("seller") or {}
-    if seller_node.get("feedbackPercentage"):
-        try:
-            seller_pct = float(seller_node["feedbackPercentage"])
-        except ValueError:
-            seller_pct = None
-    if seller_pct is not None and seller_pct < MIN_FEEDBACK:
+    try:
+        seller_pct = float(seller_node.get("feedbackPercentage"))
+    except (TypeError, ValueError):
+        seller_pct = None
+    try:
+        seller_count = int(seller_node.get("feedbackScore"))
+    except (TypeError, ValueError):
+        seller_count = None
+
+    if seller_pct is None or seller_count is None:
+        return None                       # no history published — no thanks
+    if seller_pct < MIN_FEEDBACK:
         return None
+    if seller_count < MIN_FEEDBACK_COUNT:
+        return None
+
+    if US_ONLY:
+        country = ((item.get("itemLocation") or {}).get("country") or "").upper()
+        if country and country != "US":
+            return None                   # long-haul knock-off shipping
 
     fees = benchmark * (MARKETPLACE_PCT + PROMOTED_PCT) / 100
     net = max(0.0, benchmark - fees - SHIP_TO_BUYER)
@@ -292,7 +317,8 @@ def evaluate(item, set_row):
 def main():
     log(f"BrickMargin deals collector — version {VERSION}")
     log(f"  discount {MIN_DISCOUNT}-{MAX_DISCOUNT}% · min margin {MIN_MARGIN}% · "
-        f"max {MAX_PER_SET}/set · seller >={MIN_FEEDBACK}% · "
+        f"max {MAX_PER_SET}/set · seller >={MIN_FEEDBACK}% "
+        f"with >={MIN_FEEDBACK_COUNT} sales · US_ONLY={US_ONLY} · "
         f"{MAX_SETS} sets · probe={PROBE}")
 
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -351,7 +377,8 @@ def main():
             log(f"    {d['condition']:4} {d['set_num']:>10} "
                 f"${d['total_price']:>8.2f} (item ${d['item_price']:.2f} "
                 f"+ ship ${d['shipping']:.2f}) vs ${d['market_value']:.2f} "
-                f"→ {d['margin_pct']:.0f}% margin")
+                f"→ {d['margin_pct']:.0f}% · seller {d['seller']} "
+                f"{d['feedback_pct']}%")
         log("  PROBE — nothing written")
         return
 
