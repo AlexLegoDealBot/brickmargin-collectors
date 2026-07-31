@@ -33,6 +33,7 @@ Environment
 
 import base64
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,7 +41,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.0"
+VERSION = "1.1-sanity"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -75,6 +76,13 @@ EBAY_APP_ID = require("EBAY_APP_ID")
 EBAY_CERT_ID = require("EBAY_CERT_ID")
 
 MIN_DISCOUNT = num_env("MIN_DISCOUNT", 15)
+# The ceiling matters more than the floor. Nothing sells a $1,600 set for
+# $6 — a listing that cheap is a minifigure, a manual or an empty box that
+# happens to mention the number. Anything below (100 - MAX_DISCOUNT)% of
+# value is rejected as not-the-set rather than celebrated as a bargain.
+MAX_DISCOUNT = num_env("MAX_DISCOUNT", 70)
+MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
+MIN_FEEDBACK = num_env("MIN_FEEDBACK", 90)
 MIN_MARGIN = num_env("MIN_MARGIN", 20)
 MAX_SETS = int(num_env("MAX_SETS", 300))
 MIN_VALUE = num_env("MIN_VALUE", 60)
@@ -135,15 +143,35 @@ def shipping_cost(item):
     return 0.0 if cost is None and first.get("shippingCost") else cost
 
 
+# Words that mean "this is not the complete set". The first probe run
+# returned 4,872 "deals" because this list was a tenth of this length and
+# the set number was matched as a substring.
+JUNK = (
+    "instruction", "manual", "booklet", "sticker", "decal", "poster",
+    "catalog", "catalogue", "magazine", "card", "sealed bag", "polybag",
+    "bag only", "box only", "empty box", "empty", "no box", "box no",
+    "minifig", "mini fig", "minifigure", "figure only", "fig only",
+    "part", "parts", "piece only", "pieces only", "brick only", "bricks only",
+    "replacement", "spare", "missing", "incomplete", "damaged", "broken",
+    "read description", "for parts", "not complete", "keychain", "key chain",
+    "magnet", "pen", "shirt", "mug", "custom", "compatible", "knock",
+    "knockoff", "moc", "lot of", "bundle", "job lot", "choose", "pick your",
+    "you pick", "select", "assorted", "random",
+)
+
+
 def is_relevant(title, num):
-    """The set number must appear, and the listing must be a whole set."""
+    """
+    The listing must plausibly BE the set.
+
+    The number has to appear as its own token — plain substring matching
+    let 70922 match inside longer part numbers and turned accessories into
+    thousand-percent bargains.
+    """
     t = (title or "").lower()
-    if num not in t:
+    if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t):
         return False, "number missing"
-    for bad in ("instruction", "manual", "sticker", "empty box", "box only",
-                "minifig only", "minifigure only", "no bricks", "poster",
-                "catalog", "magazine", "lot of", "bundle", "custom",
-                "compatible", "knock", "moc"):
+    for bad in JUNK:
         if bad in t:
             return False, bad
     return True, ""
@@ -174,6 +202,10 @@ def search(token, set_num, condition_filter):
         params={
             "q": f"LEGO {base_number(set_num)}",
             "filter": f"conditions:{{{condition_filter}}},buyingOptions:{{FIXED_PRICE}}",
+            # eBay's own "LEGO Complete Sets & Packs" category. The single
+            # most effective filter available — it excludes the parts,
+            # minifigure and instruction categories at source.
+            "category_ids": "19006",
             "sort": "price",
             "limit": LISTINGS_PER_SET,
         },
@@ -218,6 +250,18 @@ def evaluate(item, set_row):
     discount = (benchmark - total) / benchmark * 100
     if discount < MIN_DISCOUNT:
         return None
+    if discount > MAX_DISCOUNT:
+        return None          # too good to be the set — it isn't the set
+
+    seller_pct = None
+    seller_node = item.get("seller") or {}
+    if seller_node.get("feedbackPercentage"):
+        try:
+            seller_pct = float(seller_node["feedbackPercentage"])
+        except ValueError:
+            seller_pct = None
+    if seller_pct is not None and seller_pct < MIN_FEEDBACK:
+        return None
 
     fees = benchmark * (MARKETPLACE_PCT + PROMOTED_PCT) / 100
     net = max(0.0, benchmark - fees - SHIP_TO_BUYER)
@@ -225,7 +269,6 @@ def evaluate(item, set_row):
     if margin < MIN_MARGIN:
         return None
 
-    seller = item.get("seller") or {}
     return {
         "item_id": str(item.get("itemId")),
         "set_num": set_row["set_num"],
@@ -238,9 +281,8 @@ def evaluate(item, set_row):
         "discount_pct": round(discount, 2),
         "net_if_flipped": round(net, 2),
         "margin_pct": round(margin, 2),
-        "seller": seller.get("username"),
-        "feedback_pct": (float(seller["feedbackPercentage"])
-                         if seller.get("feedbackPercentage") else None),
+        "seller": seller_node.get("username"),
+        "feedback_pct": seller_pct,
         "image_url": (item.get("image") or {}).get("imageUrl"),
         "item_url": item.get("itemWebUrl") or "",
         "last_seen": datetime.now(timezone.utc).isoformat(),
@@ -249,7 +291,8 @@ def evaluate(item, set_row):
 
 def main():
     log(f"BrickMargin deals collector — version {VERSION}")
-    log(f"  min discount {MIN_DISCOUNT}% · min margin {MIN_MARGIN}% · "
+    log(f"  discount {MIN_DISCOUNT}-{MAX_DISCOUNT}% · min margin {MIN_MARGIN}% · "
+        f"max {MAX_PER_SET}/set · seller >={MIN_FEEDBACK}% · "
         f"{MAX_SETS} sets · probe={PROBE}")
 
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -286,7 +329,22 @@ def main():
         if scanned % 25 == 0:
             log(f"  {scanned} scanned · {len(found)} deals so far")
 
-    log(f"  found {len(found)} deals")
+    # One listing can arrive twice (both condition passes, multi-quantity),
+    # and one set with many cheap listings must not flood the board.
+    unique = {}
+    for d in found:
+        prior = unique.get(d["item_id"])
+        if not prior or d["margin_pct"] > prior["margin_pct"]:
+            unique[d["item_id"]] = d
+
+    per_set = {}
+    for d in sorted(unique.values(), key=lambda x: -x["margin_pct"]):
+        bucket = per_set.setdefault(d["set_num"], [])
+        if len(bucket) < MAX_PER_SET:
+            bucket.append(d)
+    found = [d for bucket in per_set.values() for d in bucket]
+
+    log(f"  found {len(found)} deals across {len(per_set)} sets")
 
     if PROBE:
         for d in sorted(found, key=lambda x: -x["margin_pct"])[:12]:
