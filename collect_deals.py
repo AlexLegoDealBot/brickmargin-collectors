@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.3-confident"
+VERSION = "1.4-nameproof"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -175,20 +175,44 @@ JUNK = (
 )
 
 
-def is_relevant(title, num):
+NAME_STOP = {
+    "the", "and", "of", "a", "an", "with", "set", "lego", "for", "from",
+    "edition", "collection", "series", "pack", "mini", "large", "small",
+}
+
+
+def name_tokens(name):
+    """Distinctive words from a set's name — what a real listing must say."""
+    words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return [w for w in words if len(w) >= 4 and w not in NAME_STOP]
+
+
+def is_relevant(title, num, set_name):
     """
     The listing must plausibly BE the set.
 
-    The number has to appear as its own token — plain substring matching
-    let 70922 match inside longer part numbers and turned accessories into
-    thousand-percent bargains.
+    Three gates, and the third is the one that matters. A patch shop listing
+    "LEGO 72153 embroidered patch" clears a number check and a category check
+    — sellers miscategorise constantly — but it will never contain the word
+    "Venusaur". Requiring a distinctive word from the set's own name is what
+    separates the set from things that merely mention it.
     """
     t = (title or "").lower()
+
+    if "lego" not in t:
+        return False, "not lego"
+
     if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t):
         return False, "number missing"
+
     for bad in JUNK:
         if bad in t:
             return False, bad
+
+    tokens = name_tokens(set_name)
+    if tokens and not any(tok in t for tok in tokens):
+        return False, "name absent"
+
     return True, ""
 
 
@@ -239,7 +263,7 @@ def evaluate(item, set_row):
     num = base_number(set_row["set_num"])
     title = item.get("title") or ""
 
-    keep, _why = is_relevant(title, num)
+    keep, _why = is_relevant(title, num, set_row.get("name"))
     if not keep:
         return None
 
@@ -406,4 +430,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()    
