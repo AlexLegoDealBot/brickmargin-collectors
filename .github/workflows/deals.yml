@@ -10,22 +10,26 @@ on:
         default: true
       min_discount:
         description: 'Percent below market value to qualify'
-        default: '15'
+        default: '12'
       min_margin:
         description: 'Percent profit after fees to qualify'
-        default: '20'
+        default: '15'
       max_discount:
         description: 'Reject anything cheaper than this % below value (junk guard)'
         default: '55'
       min_feedback:
         description: 'Minimum seller feedback percentage'
-        default: '97'
+        default: '95'
       min_feedback_count:
         description: 'Minimum number of seller sales'
-        default: '50'
+        default: '15'
+      exclude_retired:
+        description: 'Only sets still in production (the hold candidates)'
+        type: boolean
+        default: true
       max_sets:
         description: 'How many sets to scan'
-        default: '300'
+        default: '1200'
   schedule:
     - cron: '0 2,6,10,14,18,22 * * *'
 
@@ -47,10 +51,11 @@ jobs:
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           # Scheduled runs have no inputs, so fall back to writing mode.
           PROBE: ${{ github.event.inputs.probe || 'false' }}
-          MIN_DISCOUNT: ${{ github.event.inputs.min_discount || '15' }}
-          MIN_MARGIN: ${{ github.event.inputs.min_margin || '20' }}
+          MIN_DISCOUNT: ${{ github.event.inputs.min_discount || '12' }}
+          MIN_MARGIN: ${{ github.event.inputs.min_margin || '15' }}
           MAX_DISCOUNT: ${{ github.event.inputs.max_discount || '55' }}
-          MIN_FEEDBACK: ${{ github.event.inputs.min_feedback || '97' }}
-          MIN_FEEDBACK_COUNT: ${{ github.event.inputs.min_feedback_count || '50' }}
-          MAX_SETS: ${{ github.event.inputs.max_sets || '300' }}
+          MIN_FEEDBACK: ${{ github.event.inputs.min_feedback || '95' }}
+          MIN_FEEDBACK_COUNT: ${{ github.event.inputs.min_feedback_count || '15' }}
+          EXCLUDE_RETIRED: ${{ github.event.inputs.exclude_retired || 'true' }}
+          MAX_SETS: ${{ github.event.inputs.max_sets || '1200' }}
         run: python collect_deals.py
