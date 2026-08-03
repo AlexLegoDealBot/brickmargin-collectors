@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "2.1-assert"
+VERSION = "2.2-theme"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -220,10 +220,24 @@ NAME_STOP = {
 }
 
 
-def name_tokens(name):
-    """Distinctive words from a set's name — what a real listing must say."""
+def name_tokens(name, theme=None):
+    """
+    Distinctive words from a set's name — with the theme's own words removed.
+
+    This is subtler than it looks and it cost us a bad listing. "Death Star"
+    yields ["death", "star"], but "star" is also in the theme "Star Wars", so
+    EVERY Star Wars listing satisfied it. A TIE Fighter listing carrying
+    75419 in its title passed the name gate on the strength of the word
+    "Star" alone.
+
+    Words the theme already contains carry no evidence about which set this
+    is, so they're struck out. What remains is what actually identifies the
+    product: "death".
+    """
     words = re.findall(r"[a-z0-9]+", (name or "").lower())
-    return [w for w in words if len(w) >= 4 and w not in NAME_STOP]
+    theme_words = set(re.findall(r"[a-z0-9]+", (theme or "").lower()))
+    return [w for w in words
+            if len(w) >= 4 and w not in NAME_STOP and w not in theme_words]
 
 
 def is_relevant(title, num, set_name):
@@ -248,7 +262,7 @@ def is_relevant(title, num, set_name):
         if bad in t:
             return False, bad
 
-    tokens = name_tokens(set_name)
+    tokens = name_tokens(set_name, theme)
     if tokens:
         hits = sum(1 for tok in tokens if tok in t)
         if hits == 0:
@@ -422,7 +436,7 @@ def evaluate(item, set_row):
     num = base_number(set_row["set_num"])
     title = item.get("title") or ""
 
-    keep, why = is_relevant(title, num, set_row.get("name"))
+    keep, why = is_relevant(title, num, set_row.get("name"), set_row.get("theme"))
     if not keep:
         if PROBE and why in ("partial name match", "name absent"):
             REJECTED.append(f"{why:20} {title[:80]}")
@@ -536,7 +550,7 @@ def main():
     # Scan the sets worth scanning: priced, plausible, and expensive enough
     # that postage doesn't eat the whole margin.
     resp = (client.table("set_values")
-            .select("set_num,name,market_value,comp_count,confidence,msrp")
+            .select("set_num,name,theme,market_value,comp_count,confidence,msrp")
             .eq("plausible", True)
             .in_("confidence", ["high", "medium"])
             .gte("comp_count", MIN_COMPS)
