@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "1.6-single-unit"
+VERSION = "2.0-nameproof"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -224,20 +224,44 @@ def search_listings(token, set_num):
     return resp.json().get("itemSummaries", []) or []
 
 
-def is_relevant(title, num):
+NAME_STOP = {
+    "the", "and", "of", "a", "an", "with", "set", "lego", "for", "from",
+    "edition", "collection", "series", "pack", "mini", "large", "small",
+}
+
+
+def name_tokens(name):
+    """Distinctive words from the set's own name."""
+    words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return [w for w in words if len(w) >= 4 and w not in NAME_STOP]
+
+
+def is_relevant(title, num, set_name=None):
     """
     Gates, in order. Returns (keep: bool, reason: str) so the probe output can
     show exactly why something was excluded.
 
-      1. The set number must appear in the title — the strongest signal we have
-         that this listing is the right product.
-      2. No junk terms (wrong product, third-party build, or used/opened).
-      3. If STRICT_SEALED, the title must positively assert sealed condition.
+      1. The number must appear as its own token — plain substring matching
+         let a set number match inside a longer part number.
+      2. The title must mention LEGO at all.
+      3. A distinctive word from the set's own name must appear. This is the
+         gate that matters: a seller can put "LEGO 75313" on a patch and drop
+         it in the LEGO category, but they will never write "AT-AT". Wrong
+         products landing in the sample is how a median inflates.
+      4. No junk terms (wrong product, third-party build, or used/opened).
+      5. If STRICT_SEALED, the title must positively assert sealed condition.
     """
     low = title.lower()
 
-    if num not in low:
+    if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", low):
         return False, "wrong set"
+
+    if "lego" not in low:
+        return False, "not lego"
+
+    tokens = name_tokens(set_name)
+    if tokens and not any(tok in low for tok in tokens):
+        return False, "name absent"
 
     for term in JUNK_TERMS:
         if term in low:
@@ -251,7 +275,7 @@ def is_relevant(title, num):
     return True, "ok"
 
 
-def summarize(items, set_num):
+def summarize(items, set_num, set_name=None):
     """
     Turn raw listings into a comp row. Returns (row, kept_count, sample) or
     (None, kept_count, sample) when there's too little to be meaningful.
@@ -272,7 +296,7 @@ def summarize(items, set_num):
         if price <= 0:
             continue
 
-        keep, reason = is_relevant(title, num)
+        keep, reason = is_relevant(title, num, set_name)
         if len(sample) < 8:
             sample.append(("KEEP" if keep else f"drop {reason}",
                            round(price, 2), title[:64]))
@@ -289,8 +313,21 @@ def summarize(items, set_num):
     # use as a confidence signal. So: take a preliminary median (robust), drop
     # anything implausibly far from it, then recompute on what's left.
     # The band is deliberately generous; it removes absurdities, not variance.
+    # Two-stage trim. The old 0.35x-2.5x band around a preliminary median was
+    # wide enough to keep genuine fantasy pricing in the sample — one seller
+    # asking triple drags the median up for everyone. Now: the wide band
+    # first, then an interquartile fence, which adapts to how tightly the
+    # real listings actually cluster instead of using fixed multiples.
     prelim = statistics.median(prices)
-    trimmed = [p for p in prices if 0.35 * prelim <= p <= 2.5 * prelim]
+    trimmed = [p for p in prices if 0.45 * prelim <= p <= 1.9 * prelim]
+    if len(trimmed) >= 6:
+        qq = statistics.quantiles(trimmed, n=4)
+        iqr = qq[2] - qq[0]
+        if iqr > 0:
+            lo, hi = qq[0] - 1.5 * iqr, qq[2] + 1.5 * iqr
+            fenced = [p for p in trimmed if lo <= p <= hi]
+            if len(fenced) >= MIN_LISTINGS:
+                trimmed = fenced
     if len(trimmed) < MIN_LISTINGS:
         trimmed = prices          # trimming ate too much — keep the raw set
     outliers = len(prices) - len(trimmed)

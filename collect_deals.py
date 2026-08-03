@@ -39,9 +39,10 @@ import time
 from datetime import datetime, timezone
 
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "1.2-trust"
+VERSION = "1.6-parallel"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -52,8 +53,13 @@ MARKETPLACE_PCT = 13.25
 PROMOTED_PCT = 2.0
 SHIP_TO_BUYER = 12.0
 
-LISTINGS_PER_SET = 30
-PAUSE = 0.25
+LISTINGS_PER_SET = 50
+PAUSE = 0.05
+# eBay answers in ~350ms, so a serial scan spends nearly all its time waiting
+# rather than working. Eight workers turns a seven-minute run into about one.
+# Held at eight deliberately: the Browse API has a daily call budget, and a
+# burst wide enough to trip rate limiting costs more time than it saves.
+WORKERS = int(os.environ.get("WORKERS", "8"))
 
 
 def require(name):
@@ -90,6 +96,14 @@ MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
 # doubt. We are sending real people to spend real money.
 MIN_FEEDBACK = num_env("MIN_FEEDBACK", 97)
 MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 50))
+# A deal is a gap between a listing and OUR value — so a wrong value invents
+# a deal that never existed. Only sets we're confident about qualify.
+MIN_COMPS = int(num_env("MIN_COMPS", 5))
+# The buy-and-hold thesis needs a set that is still in production. Once a
+# set retires the market has already repriced it, so a discount there is
+# just a discount — not a position. Retired sets are excluded by default.
+EXCLUDE_RETIRED = os.environ.get("EXCLUDE_RETIRED", "true").strip().lower() != "false"
+SOURCE = "ebay"
 US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
 MIN_MARGIN = num_env("MIN_MARGIN", 20)
 MAX_SETS = int(num_env("MAX_SETS", 300))
@@ -172,20 +186,44 @@ JUNK = (
 )
 
 
-def is_relevant(title, num):
+NAME_STOP = {
+    "the", "and", "of", "a", "an", "with", "set", "lego", "for", "from",
+    "edition", "collection", "series", "pack", "mini", "large", "small",
+}
+
+
+def name_tokens(name):
+    """Distinctive words from a set's name — what a real listing must say."""
+    words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return [w for w in words if len(w) >= 4 and w not in NAME_STOP]
+
+
+def is_relevant(title, num, set_name):
     """
     The listing must plausibly BE the set.
 
-    The number has to appear as its own token — plain substring matching
-    let 70922 match inside longer part numbers and turned accessories into
-    thousand-percent bargains.
+    Three gates, and the third is the one that matters. A patch shop listing
+    "LEGO 72153 embroidered patch" clears a number check and a category check
+    — sellers miscategorise constantly — but it will never contain the word
+    "Venusaur". Requiring a distinctive word from the set's own name is what
+    separates the set from things that merely mention it.
     """
     t = (title or "").lower()
+
+    if "lego" not in t:
+        return False, "not lego"
+
     if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t):
         return False, "number missing"
+
     for bad in JUNK:
         if bad in t:
             return False, bad
+
+    tokens = name_tokens(set_name)
+    if tokens and not any(tok in t for tok in tokens):
+        return False, "name absent"
+
     return True, ""
 
 
@@ -205,7 +243,13 @@ def condition_of(item):
     return None
 
 
-def search(token, set_num, condition_filter):
+def search(token, set_num, condition_filter="NEW|USED"):
+    """
+    One call per set, both conditions at once.
+
+    The old code made a NEW request and a USED request per set — double the
+    calls against a daily budget, for data eBay is happy to return together.
+    """
     resp = requests.get(
         EBAY_SEARCH_URL,
         headers={"Authorization": f"Bearer {token}",
@@ -231,12 +275,49 @@ def search(token, set_num, condition_filter):
     return resp.json().get("itemSummaries", []) or []
 
 
+def hold_score(margin, discount, comps, seller_pct, seller_count, retired):
+    """
+    A 1-10 rating, so nobody has to weigh four numbers themselves.
+
+    Deliberately blunt about what it rewards: profit after fees carries the
+    most weight, then how far under market it sits, then how much evidence
+    stands behind our value, then who is selling it. A set still in
+    production earns a full point on top, because that is the position this
+    board exists to find.
+
+    It is a summary of figures shown on the same card, never a substitute
+    for them — the numbers stay visible so anyone can disagree with the
+    weighting.
+    """
+    pts = 0.0
+
+    # Profit after fees — up to 4.
+    pts += min(4.0, max(0.0, (margin - 20) / 25))
+
+    # Distance under market — up to 2.
+    pts += min(2.0, max(0.0, (discount - 15) / 17.5))
+
+    # Evidence behind our value — up to 1.5.
+    pts += min(1.5, (comps or 0) / 14)
+
+    # Who is selling — up to 1.5.
+    if seller_pct is not None and seller_count is not None:
+        trust = ((seller_pct - 97) / 3) * 0.6 + min(1.0, seller_count / 500) * 0.9
+        pts += max(0.0, min(1.5, trust))
+
+    # Still buyable at retail — the hold candidate.
+    if not retired:
+        pts += 1.0
+
+    return round(max(1.0, min(10.0, pts)), 1)
+
+
 def evaluate(item, set_row):
     """Turn one listing into a deal row, or None."""
     num = base_number(set_row["set_num"])
     title = item.get("title") or ""
 
-    keep, _why = is_relevant(title, num)
+    keep, _why = is_relevant(title, num, set_row.get("name"))
     if not keep:
         return None
 
@@ -294,8 +375,15 @@ def evaluate(item, set_row):
     if margin < MIN_MARGIN:
         return None
 
+    retired = bool(set_row.get("retired_at"))
+    score = hold_score(margin, discount, set_row.get("comp_count"),
+                       seller_pct, seller_count, retired)
+
     return {
         "item_id": str(item.get("itemId")),
+        "source": SOURCE,
+        "score": score,
+        "retired": retired,
         "set_num": set_row["set_num"],
         "title": title[:300],
         "condition": cond,
@@ -326,49 +414,74 @@ def main():
     # Scan the sets worth scanning: priced, plausible, and expensive enough
     # that postage doesn't eat the whole margin.
     resp = (client.table("set_values")
-            .select("set_num,name,market_value")
+            .select("set_num,name,market_value,comp_count,confidence")
             .eq("plausible", True)
+            .in_("confidence", ["high", "medium"])
+            .gte("comp_count", MIN_COMPS)
             .gte("market_value", MIN_VALUE)
             .order("market_value", desc=True)
             .limit(MAX_SETS)
             .execute())
     sets = resp.data or []
-    log(f"  scanning {len(sets)} sets")
+
+    # Retirement status lives on `sets`, not on the values view.
+    nums = [r["set_num"] for r in sets]
+    retired_map = {}
+    for i in range(0, len(nums), 200):
+        chunk = nums[i:i + 200]
+        got = (client.table("sets").select("set_num,retired_at")
+               .in_("set_num", chunk).execute())
+        for r in (got.data or []):
+            retired_map[r["set_num"]] = r.get("retired_at")
+
+    for r in sets:
+        r["retired_at"] = retired_map.get(r["set_num"])
+
+    if EXCLUDE_RETIRED:
+        before = len(sets)
+        sets = [r for r in sets if not r.get("retired_at")]
+        log(f"  {before - len(sets)} retired sets excluded — "
+            f"this board is for sets you can still buy and hold")
+
+    log(f"  scanning {len(sets)} sets (confidence high/medium, "
+        f">={MIN_COMPS} listings behind each value)")
 
     token = get_token()
-    found, scanned = [], 0
+    found = []
+    rate_limited = False
 
-    for set_row in sets:
-        scanned += 1
-        for cond_filter in ("NEW", "USED"):
-            items = search(token, set_row["set_num"], cond_filter)
-            if items == "RATE_LIMIT":
-                log("  RATE LIMITED — stopping cleanly, keeping what we have")
-                items = None
-                sets = []
-                break
-            for item in (items or []):
-                deal = evaluate(item, set_row)
-                if deal:
-                    found.append(deal)
-            time.sleep(PAUSE)
-        if scanned % 25 == 0:
-            log(f"  {scanned} scanned · {len(found)} deals so far")
+    def scan(set_row):
+        """One set, one call. Returns its qualifying deals."""
+        items = search(token, set_row["set_num"])
+        if items == "RATE_LIMIT":
+            return "RATE_LIMIT"
+        out = []
+        for item in (items or []):
+            deal = evaluate(item, set_row)
+            if deal:
+                out.append(deal)
+        time.sleep(PAUSE)
+        return out
 
-    # One listing can arrive twice (both condition passes, multi-quantity),
-    # and one set with many cheap listings must not flood the board.
-    unique = {}
-    for d in found:
-        prior = unique.get(d["item_id"])
-        if not prior or d["margin_pct"] > prior["margin_pct"]:
-            unique[d["item_id"]] = d
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = {pool.submit(scan, r): r for r in sets}
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                result = fut.result()
+            except Exception as exc:
+                log(f"  {futures[fut]['set_num']}: {exc}")
+                continue
+            if result == "RATE_LIMIT":
+                rate_limited = True
+                continue
+            found.extend(result)
+            if done % 50 == 0:
+                log(f"  {done}/{len(sets)} scanned · {len(found)} candidates")
 
-    per_set = {}
-    for d in sorted(unique.values(), key=lambda x: -x["margin_pct"]):
-        bucket = per_set.setdefault(d["set_num"], [])
-        if len(bucket) < MAX_PER_SET:
-            bucket.append(d)
-    found = [d for bucket in per_set.values() for d in bucket]
+    if rate_limited:
+        log("  NOTE: eBay rate-limited some calls — results are partial")
 
     log(f"  found {len(found)} deals across {len(per_set)} sets")
 
@@ -377,8 +490,8 @@ def main():
             log(f"    {d['condition']:4} {d['set_num']:>10} "
                 f"${d['total_price']:>8.2f} (item ${d['item_price']:.2f} "
                 f"+ ship ${d['shipping']:.2f}) vs ${d['market_value']:.2f} "
-                f"→ {d['margin_pct']:.0f}% · seller {d['seller']} "
-                f"{d['feedback_pct']}%")
+                f"→ {d['margin_pct']:.0f}% · score {d['score']}/10 · "
+                f"{d['seller']} {d['feedback_pct']}%")
         log("  PROBE — nothing written")
         return
 
