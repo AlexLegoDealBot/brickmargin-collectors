@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "1.6-parallel"
+VERSION = "1.7-parallel"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -482,6 +482,21 @@ def main():
 
     if rate_limited:
         log("  NOTE: eBay rate-limited some calls — results are partial")
+
+    # One listing can arrive twice (multi-quantity, repeated pages), and a
+    # single set with several cheap listings must not flood the board.
+    unique = {}
+    for d in found:
+        prior = unique.get(d["item_id"])
+        if not prior or d["margin_pct"] > prior["margin_pct"]:
+            unique[d["item_id"]] = d
+
+    per_set = {}
+    for d in sorted(unique.values(), key=lambda x: -(x.get("score") or x["margin_pct"])):
+        bucket = per_set.setdefault(d["set_num"], [])
+        if len(bucket) < MAX_PER_SET:
+            bucket.append(d)
+    found = [d for bucket in per_set.values() for d in bucket]
 
     log(f"  found {len(found)} deals across {len(per_set)} sets")
 
