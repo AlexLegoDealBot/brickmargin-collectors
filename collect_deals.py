@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "1.7-parallel"
+VERSION = "1.8-wholeset"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -88,7 +88,14 @@ MIN_DISCOUNT = num_env("MIN_DISCOUNT", 15)
 # value is rejected as not-the-set rather than celebrated as a bargain.
 # 70% was still generous enough to admit scam bait. A genuine underpriced
 # set is usually 15-55% under market; below that, the listing is lying.
-MAX_DISCOUNT = num_env("MAX_DISCOUNT", 55)
+MAX_DISCOUNT = num_env("MAX_DISCOUNT", 52)
+# A complete sealed set does not sell for a third of its retail price. When
+# we know the set's MSRP, that becomes a hard floor: anything under this
+# fraction of retail is a component, a part-out, or a fiction — never the
+# whole box. This catches what vocabulary filters can't, because a seller
+# listing one minifigure writes an honest title we simply can't parse.
+MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.45)
+MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.28)
 MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
 # Feedback percentage alone means nothing — 100% from two sales is riskier
 # than 98% from five thousand. Both gates must pass, and a seller with no
@@ -179,6 +186,18 @@ JUNK = (
     "magnet", "pen", "shirt", "mug", "custom", "compatible", "knock",
     "knockoff", "moc", "lot of", "bundle", "job lot", "choose", "pick your",
     "you pick", "select", "assorted", "random",
+    # PART OF A SET, sold as its own item. These listings are honest — the
+    # seller says exactly what they have — so the only failure was ours in
+    # not reading it. A Charizard from set 72153 carries the set number AND
+    # a word from the set name, and passes every other gate.
+    "only", "just the", "from set", "from the set", "part of set",
+    "parting out", "part out", "split", "single figure", "one figure",
+    "individual", "loose", "second floor", "2nd floor", "third floor",
+    "3rd floor", "first floor", "1st floor", "ground floor", "top floor",
+    "middle floor", "one level", "single level", "no minifig", "without minifig",
+    "figure from", "figs from", "minifigs from", "base only", "stand only",
+    "display only", "no box", "sealed bag from", "bags only", "bag from",
+    "partial", "incomplete set", "portion",
     # Knock-off sellers rarely say "fake" — they say these instead.
     "generic", "unbranded", "aftermarket", "replica", "clone", "third party",
     "compatible with", "fits lego", "lego style", "building blocks",
@@ -221,8 +240,16 @@ def is_relevant(title, num, set_name):
             return False, bad
 
     tokens = name_tokens(set_name)
-    if tokens and not any(tok in t for tok in tokens):
-        return False, "name absent"
+    if tokens:
+        hits = sum(1 for tok in tokens if tok in t)
+        if hits == 0:
+            return False, "name absent"
+        # A set named for several things must be described by several of
+        # them. "Venusaur, Charizard and Blastoise" needs at least two —
+        # a listing naming only Charizard is selling only Charizard.
+        need = 2 if len(tokens) >= 3 else 1
+        if hits < need:
+            return False, "partial name match"
 
     return True, ""
 
@@ -346,6 +373,14 @@ def evaluate(item, set_row):
     if discount > MAX_DISCOUNT:
         return None          # too good to be the set — it isn't the set
 
+    # Retail-price floor. The strongest whole-set test we have, because it
+    # doesn't depend on how the seller worded their title.
+    msrp = set_row.get("msrp")
+    if msrp:
+        floor = float(msrp) * (MSRP_FLOOR_NEW if cond == "new" else MSRP_FLOOR_USED)
+        if total < floor:
+            return None      # a fraction of retail means a fraction of the set
+
     # --- who is selling it -------------------------------------------------
     seller_node = item.get("seller") or {}
     try:
@@ -405,6 +440,7 @@ def evaluate(item, set_row):
 def main():
     log(f"BrickMargin deals collector — version {VERSION}")
     log(f"  discount {MIN_DISCOUNT}-{MAX_DISCOUNT}% · min margin {MIN_MARGIN}% · "
+        f"msrp floor {MSRP_FLOOR_NEW:.0%}/{MSRP_FLOOR_USED:.0%} · "
         f"max {MAX_PER_SET}/set · seller >={MIN_FEEDBACK}% "
         f"with >={MIN_FEEDBACK_COUNT} sales · US_ONLY={US_ONLY} · "
         f"{MAX_SETS} sets · probe={PROBE}")
@@ -414,7 +450,7 @@ def main():
     # Scan the sets worth scanning: priced, plausible, and expensive enough
     # that postage doesn't eat the whole margin.
     resp = (client.table("set_values")
-            .select("set_num,name,market_value,comp_count,confidence")
+            .select("set_num,name,market_value,comp_count,confidence,msrp")
             .eq("plausible", True)
             .in_("confidence", ["high", "medium"])
             .gte("comp_count", MIN_COMPS)
