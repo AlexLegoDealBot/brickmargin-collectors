@@ -42,7 +42,11 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
+<<<<<<< HEAD
 VERSION = "1.6-parallel"
+=======
+VERSION = "1.4-nameproof"
+>>>>>>> 98c67adb3713abd55c4f4a88e8e1e1ad25961b23
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -99,11 +103,14 @@ MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 50))
 # A deal is a gap between a listing and OUR value — so a wrong value invents
 # a deal that never existed. Only sets we're confident about qualify.
 MIN_COMPS = int(num_env("MIN_COMPS", 5))
+<<<<<<< HEAD
 # The buy-and-hold thesis needs a set that is still in production. Once a
 # set retires the market has already repriced it, so a discount there is
 # just a discount — not a position. Retired sets are excluded by default.
 EXCLUDE_RETIRED = os.environ.get("EXCLUDE_RETIRED", "true").strip().lower() != "false"
 SOURCE = "ebay"
+=======
+>>>>>>> 98c67adb3713abd55c4f4a88e8e1e1ad25961b23
 US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
 MIN_MARGIN = num_env("MIN_MARGIN", 20)
 MAX_SETS = int(num_env("MAX_SETS", 300))
@@ -423,6 +430,7 @@ def main():
             .limit(MAX_SETS)
             .execute())
     sets = resp.data or []
+<<<<<<< HEAD
 
     # Retirement status lives on `sets`, not on the values view.
     nums = [r["set_num"] for r in sets]
@@ -443,6 +451,8 @@ def main():
         log(f"  {before - len(sets)} retired sets excluded — "
             f"this board is for sets you can still buy and hold")
 
+=======
+>>>>>>> 98c67adb3713abd55c4f4a88e8e1e1ad25961b23
     log(f"  scanning {len(sets)} sets (confidence high/medium, "
         f">={MIN_COMPS} listings behind each value)")
 
@@ -513,4 +523,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()    
