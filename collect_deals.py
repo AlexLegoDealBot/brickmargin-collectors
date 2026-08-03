@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "1.9-complete"
+VERSION = "2.0-assert"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -94,8 +94,8 @@ MAX_DISCOUNT = num_env("MAX_DISCOUNT", 52)
 # fraction of retail is a component, a part-out, or a fiction — never the
 # whole box. This catches what vocabulary filters can't, because a seller
 # listing one minifigure writes an honest title we simply can't parse.
-MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.45)
-MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.28)
+MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.55)
+MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.40)
 # "Used" here means one thing: the complete set, opened. Not a part-built
 # copy, not missing three pieces, not "most of it". eBay's condition codes
 # can't express completeness, so the seller has to say it — a used listing
@@ -263,17 +263,73 @@ def is_relevant(title, num, set_name):
     return True, ""
 
 
+# Both conditions must now assert what they are. Blocklists lose to wording
+# we didn't anticipate — "dinosaurs from 76949", "Jazz Club floor 2" — but a
+# seller with the actual sealed box says so, because it's their selling point.
+# Requiring the claim inverts the burden: unusual wording now fails closed.
+SEALED_WORDS = (
+    "sealed", "nisb", "nib", "new in box", "brand new", "unopened",
+    "factory sealed", "never opened", "mint in box", "misb", "new sealed",
+)
+
+# Floors and levels of a modular, in every phrasing a seller might use.
+PART_PATTERNS = (
+    r"\b(floor|level|story|storey|section|module|tier)\s*#?\s*\d\b",
+    r"\b\d\s*(st|nd|rd|th)?\s*(floor|level|story|storey|section)\b",
+    r"\b(top|middle|bottom|upper|lower|ground|first|second|third)\s+"
+    r"(floor|level|story|storey|section|half|part)\b",
+    r"\b(figures?|minifigs?|minifigures?|dinosaurs?|animals?|creatures?|"
+    r"dragons?|vehicles?|cars?|ships?|droids?)\s+(only|alone|from)\b",
+    r"\bno\s+(box|set|build|building|instructions?|minifigs?|bricks?)\b",
+    r"\bjust\s+(the\s+)?\w+\b",
+)
+
+
 COMPLETE_WORDS = (
     "complete", "100%", "all pieces", "all parts", "full set", "whole set",
     "nothing missing", "no missing", "everything included", "all minifigs",
     "with all", "w/ all", "entire set",
 )
-INCOMPLETE_WORDS = (
+IN# Both conditions must now assert what they are. Blocklists lose to wording
+# we didn't anticipate — "dinosaurs from 76949", "Jazz Club floor 2" — but a
+# seller with the actual sealed box says so, because it's their selling point.
+# Requiring the claim inverts the burden: unusual wording now fails closed.
+SEALED_WORDS = (
+    "sealed", "nisb", "nib", "new in box", "brand new", "unopened",
+    "factory sealed", "never opened", "mint in box", "misb", "new sealed",
+)
+
+# Floors and levels of a modular, in every phrasing a seller might use.
+PART_PATTERNS = (
+    r"\b(floor|level|story|storey|section|module|tier)\s*#?\s*\d\b",
+    r"\b\d\s*(st|nd|rd|th)?\s*(floor|level|story|storey|section)\b",
+    r"\b(top|middle|bottom|upper|lower|ground|first|second|third)\s+"
+    r"(floor|level|story|storey|section|half|part)\b",
+    r"\b(figures?|minifigs?|minifigures?|dinosaurs?|animals?|creatures?|"
+    r"dragons?|vehicles?|cars?|ships?|droids?)\s+(only|alone|from)\b",
+    r"\bno\s+(box|set|build|building|instructions?|minifigs?|bricks?)\b",
+    r"\bjust\s+(the\s+)?\w+\b",
+)
+
+
+COMPLETE_WORDS = (
     "missing", "incomplete", "not complete", "as is", "as-is", "damaged",
     "broken", "for parts", "spares", "repair", "unchecked", "untested",
     "not verified", "may be missing", "possibly missing", "no instructions",
     "without instructions", "no manual", "some pieces", "few pieces",
 )
+
+
+def looks_partial(title):
+    """Catches the phrasings a plain word list misses."""
+    t = (title or "").lower()
+    return any(re.search(pat, t) for pat in PART_PATTERNS)
+
+
+def new_is_sealed(title):
+    """A 'new' listing has to claim the box is sealed."""
+    t = (title or "").lower()
+    return any(w in t for w in SEALED_WORDS)
 
 
 def used_is_complete(title):
@@ -341,6 +397,9 @@ def search(token, set_num, condition_filter="NEW|USED"):
     return resp.json().get("itemSummaries", []) or []
 
 
+REJECTED = []
+
+
 def hold_score(margin, discount, comps, seller_pct, seller_count, retired):
     """
     A 1-10 rating, so nobody has to weigh four numbers themselves.
@@ -383,14 +442,20 @@ def evaluate(item, set_row):
     num = base_number(set_row["set_num"])
     title = item.get("title") or ""
 
-    keep, _why = is_relevant(title, num, set_row.get("name"))
+    keep, why = is_relevant(title, num, set_row.get("name"))
     if not keep:
+        if PROBE and why in ("partial name match", "name absent"):
+            REJECTED.append(f"{why:20} {title[:80]}")
         return None
 
     cond = condition_of(item)
     if cond is None:
         return None
+    if looks_partial(title):
+        return None
     if cond == "used" and not used_is_complete(title):
+        return None
+    if cond == "new" and not new_is_sealed(title):
         return None
 
     price = money(item.get("price"))
@@ -584,6 +649,10 @@ def main():
                 f"+ ship ${d['shipping']:.2f}) vs ${d['market_value']:.2f} "
                 f"→ {d['margin_pct']:.0f}% · score {d['score']}/10 · "
                 f"{d['seller']} {d['feedback_pct']}%")
+        if REJECTED:
+            log(f"  {len(REJECTED)} near-misses rejected — a sample:")
+            for line in REJECTED[:15]:
+                log(f"    {line}")
         log("  PROBE — nothing written")
         return
 
