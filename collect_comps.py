@@ -47,7 +47,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.0-nameproof"
+VERSION = "2.1-theme"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -230,13 +230,27 @@ NAME_STOP = {
 }
 
 
-def name_tokens(name):
-    """Distinctive words from the set's own name."""
+def name_tokens(name, theme=None):
+    """
+    Distinctive words from a set's name — with the theme's own words removed.
+
+    This is subtler than it looks and it cost us a bad listing. "Death Star"
+    yields ["death", "star"], but "star" is also in the theme "Star Wars", so
+    EVERY Star Wars listing satisfied it. A TIE Fighter listing carrying
+    75419 in its title passed the name gate on the strength of the word
+    "Star" alone.
+
+    Words the theme already contains carry no evidence about which set this
+    is, so they're struck out. What remains is what actually identifies the
+    product: "death".
+    """
     words = re.findall(r"[a-z0-9]+", (name or "").lower())
-    return [w for w in words if len(w) >= 4 and w not in NAME_STOP]
+    theme_words = set(re.findall(r"[a-z0-9]+", (theme or "").lower()))
+    return [w for w in words
+            if len(w) >= 4 and w not in NAME_STOP and w not in theme_words]
 
 
-def is_relevant(title, num, set_name=None):
+def is_relevant(title, num, set_name=None, theme=None):
     """
     Gates, in order. Returns (keep: bool, reason: str) so the probe output can
     show exactly why something was excluded.
@@ -259,7 +273,7 @@ def is_relevant(title, num, set_name=None):
     if "lego" not in low:
         return False, "not lego"
 
-    tokens = name_tokens(set_name)
+    tokens = name_tokens(set_name, theme)
     if tokens and not any(tok in low for tok in tokens):
         return False, "name absent"
 
@@ -275,7 +289,7 @@ def is_relevant(title, num, set_name=None):
     return True, "ok"
 
 
-def summarize(items, set_num, set_name=None):
+def summarize(items, set_num, set_name=None, theme=None):
     """
     Turn raw listings into a comp row. Returns (row, kept_count, sample) or
     (None, kept_count, sample) when there's too little to be meaningful.
@@ -296,7 +310,7 @@ def summarize(items, set_num, set_name=None):
         if price <= 0:
             continue
 
-        keep, reason = is_relevant(title, num, set_name)
+        keep, reason = is_relevant(title, num, set_name, theme)
         if len(sample) < 8:
             sample.append(("KEEP" if keep else f"drop {reason}",
                            round(price, 2), title[:64]))
@@ -390,7 +404,7 @@ def pick_stale_sets(client, limit):
     has little resale market yet. That absence is itself useful signal.
     """
     resp = (client.table("sets")
-            .select("set_num,name,year_released,comps_last_checked_at")
+            .select("set_num,name,theme,year_released,comps_last_checked_at")
             .order("comps_last_checked_at", desc=False, nullsfirst=True)
             .order("year_released", desc=True, nullsfirst=False)
             .limit(limit)
