@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "2.2-theme"
+VERSION = "2.3-tuned"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -81,7 +81,7 @@ SUPABASE_KEY = require("SUPABASE_SERVICE_KEY")
 EBAY_APP_ID = require("EBAY_APP_ID")
 EBAY_CERT_ID = require("EBAY_CERT_ID")
 
-MIN_DISCOUNT = num_env("MIN_DISCOUNT", 15)
+MIN_DISCOUNT = num_env("MIN_DISCOUNT", 12)
 # The ceiling matters more than the floor. Nothing sells a $1,600 set for
 # $6 — a listing that cheap is a minifigure, a manual or an empty box that
 # happens to mention the number. Anything below (100 - MAX_DISCOUNT)% of
@@ -94,8 +94,8 @@ MAX_DISCOUNT = num_env("MAX_DISCOUNT", 52)
 # fraction of retail is a component, a part-out, or a fiction — never the
 # whole box. This catches what vocabulary filters can't, because a seller
 # listing one minifigure writes an honest title we simply can't parse.
-MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.55)
-MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.40)
+MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.45)
+MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.32)
 # "Used" here means one thing: the complete set, opened. Not a part-built
 # copy, not missing three pieces, not "most of it". eBay's condition codes
 # can't express completeness, so the seller has to say it — a used listing
@@ -105,13 +105,21 @@ MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.40)
 # mistake that would cost us a reader for good.
 REQUIRE_COMPLETE_USED = os.environ.get(
     "REQUIRE_COMPLETE_USED", "true").strip().lower() != "false"
+# Requiring the word "sealed" on new listings turned out to be the single
+# biggest yield killer: plenty of honest sellers write "LEGO 10312 Jazz Club
+# Modular Building" and let eBay's own New condition speak for itself. The
+# structural gates — theme-aware name matching and the partial-build
+# patterns — already catch what this was guarding against, so the sealed
+# claim now earns score rather than deciding entry.
+REQUIRE_SEALED_NEW = os.environ.get(
+    "REQUIRE_SEALED_NEW", "false").strip().lower() == "true"
 MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
 # Feedback percentage alone means nothing — 100% from two sales is riskier
 # than 98% from five thousand. Both gates must pass, and a seller with no
 # feedback history at all is rejected rather than given the benefit of the
 # doubt. We are sending real people to spend real money.
-MIN_FEEDBACK = num_env("MIN_FEEDBACK", 97)
-MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 50))
+MIN_FEEDBACK = num_env("MIN_FEEDBACK", 95)
+MIN_FEEDBACK_COUNT = int(num_env("MIN_FEEDBACK_COUNT", 15))
 # A deal is a gap between a listing and OUR value — so a wrong value invents
 # a deal that never existed. Only sets we're confident about qualify.
 MIN_COMPS = int(num_env("MIN_COMPS", 5))
@@ -121,9 +129,9 @@ MIN_COMPS = int(num_env("MIN_COMPS", 5))
 EXCLUDE_RETIRED = os.environ.get("EXCLUDE_RETIRED", "true").strip().lower() != "false"
 SOURCE = "ebay"
 US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
-MIN_MARGIN = num_env("MIN_MARGIN", 20)
-MAX_SETS = int(num_env("MAX_SETS", 300))
-MIN_VALUE = num_env("MIN_VALUE", 60)
+MIN_MARGIN = num_env("MIN_MARGIN", 15)
+MAX_SETS = int(num_env("MAX_SETS", 1200))
+MIN_VALUE = num_env("MIN_VALUE", 40)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 
 
@@ -392,6 +400,13 @@ def search(token, set_num, condition_filter="NEW|USED"):
 
 
 REJECTED = []
+REJECT_STATS = {}
+
+
+def reject(reason):
+    """Tally why a listing didn't qualify. An empty board should explain itself."""
+    REJECT_STATS[reason] = REJECT_STATS.get(reason, 0) + 1
+    return None
 
 
 def hold_score(margin, discount, comps, seller_pct, seller_count, retired):
@@ -440,17 +455,17 @@ def evaluate(item, set_row):
     if not keep:
         if PROBE and why in ("partial name match", "name absent"):
             REJECTED.append(f"{why:20} {title[:80]}")
-        return None
+        return reject(why)
 
     cond = condition_of(item)
     if cond is None:
         return None
     if looks_partial(title):
-        return None
+        return reject("partial build")
     if cond == "used" and not used_is_complete(title):
-        return None
-    if cond == "new" and not new_is_sealed(title):
-        return None
+        return reject("used: no completeness claim")
+    if cond == "new" and REQUIRE_SEALED_NEW and not new_is_sealed(title):
+        return reject("new: no sealed claim")
 
     price = money(item.get("price"))
     if price is None or price <= 0:
@@ -469,9 +484,9 @@ def evaluate(item, set_row):
 
     discount = (benchmark - total) / benchmark * 100
     if discount < MIN_DISCOUNT:
-        return None
+        return reject("discount below floor")
     if discount > MAX_DISCOUNT:
-        return None          # too good to be the set — it isn't the set
+        return reject("discount above ceiling")          # too good to be the set — it isn't the set
 
     # Retail-price floor. The strongest whole-set test we have, because it
     # doesn't depend on how the seller worded their title.
@@ -479,7 +494,7 @@ def evaluate(item, set_row):
     if msrp:
         floor = float(msrp) * (MSRP_FLOOR_NEW if cond == "new" else MSRP_FLOOR_USED)
         if total < floor:
-            return None      # a fraction of retail means a fraction of the set
+            return reject("below MSRP floor")
 
     # --- who is selling it -------------------------------------------------
     seller_node = item.get("seller") or {}
@@ -493,11 +508,11 @@ def evaluate(item, set_row):
         seller_count = None
 
     if seller_pct is None or seller_count is None:
-        return None                       # no history published — no thanks
+        return reject("seller: no feedback published")                       # no history published — no thanks
     if seller_pct < MIN_FEEDBACK:
-        return None
+        return reject("seller: rating too low")
     if seller_count < MIN_FEEDBACK_COUNT:
-        return None
+        return reject("seller: too few sales")
 
     if US_ONLY:
         country = ((item.get("itemLocation") or {}).get("country") or "").upper()
@@ -508,7 +523,7 @@ def evaluate(item, set_row):
     net = max(0.0, benchmark - fees - SHIP_TO_BUYER)
     margin = (net - total) / total * 100 if total else 0
     if margin < MIN_MARGIN:
-        return None
+        return reject("margin too thin")
 
     retired = bool(set_row.get("retired_at"))
     score = hold_score(margin, discount, set_row.get("comp_count"),
@@ -635,6 +650,13 @@ def main():
     found = [d for bucket in per_set.values() for d in bucket]
 
     log(f"  found {len(found)} deals across {len(per_set)} sets")
+
+    # Why the rest didn't qualify. When the board comes back empty this is
+    # the difference between tuning the right dial and guessing.
+    if REJECT_STATS:
+        log("  rejections by reason:")
+        for reason, n in sorted(REJECT_STATS.items(), key=lambda kv: -kv[1]):
+            log(f"    {n:6}  {reason}")
 
     if PROBE:
         for d in sorted(found, key=lambda x: -x["margin_pct"])[:12]:
