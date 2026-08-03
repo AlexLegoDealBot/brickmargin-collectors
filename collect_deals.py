@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "1.8-wholeset"
+VERSION = "1.9-complete"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -96,6 +96,15 @@ MAX_DISCOUNT = num_env("MAX_DISCOUNT", 52)
 # listing one minifigure writes an honest title we simply can't parse.
 MSRP_FLOOR_NEW = num_env("MSRP_FLOOR_NEW", 0.45)
 MSRP_FLOOR_USED = num_env("MSRP_FLOOR_USED", 0.28)
+# "Used" here means one thing: the complete set, opened. Not a part-built
+# copy, not missing three pieces, not "most of it". eBay's condition codes
+# can't express completeness, so the seller has to say it — a used listing
+# must positively assert that the set is complete, or it doesn't qualify.
+# This rejects plenty of honest listings that simply didn't use the word.
+# That's the right trade: an incomplete set sold as complete is the one
+# mistake that would cost us a reader for good.
+REQUIRE_COMPLETE_USED = os.environ.get(
+    "REQUIRE_COMPLETE_USED", "true").strip().lower() != "false"
 MAX_PER_SET = int(num_env("MAX_PER_SET", 3))
 # Feedback percentage alone means nothing — 100% from two sales is riskier
 # than 98% from five thousand. Both gates must pass, and a seller with no
@@ -254,6 +263,36 @@ def is_relevant(title, num, set_name):
     return True, ""
 
 
+COMPLETE_WORDS = (
+    "complete", "100%", "all pieces", "all parts", "full set", "whole set",
+    "nothing missing", "no missing", "everything included", "all minifigs",
+    "with all", "w/ all", "entire set",
+)
+INCOMPLETE_WORDS = (
+    "missing", "incomplete", "not complete", "as is", "as-is", "damaged",
+    "broken", "for parts", "spares", "repair", "unchecked", "untested",
+    "not verified", "may be missing", "possibly missing", "no instructions",
+    "without instructions", "no manual", "some pieces", "few pieces",
+)
+
+
+def used_is_complete(title):
+    """
+    A used listing has to say the set is whole.
+
+    Sellers of genuinely complete used sets almost always say so, because
+    it's their main selling point. Sellers of incomplete ones say that too,
+    in their own words — so both lists earn their place.
+    """
+    t = (title or "").lower()
+    for bad in INCOMPLETE_WORDS:
+        if bad in t:
+            return False
+    if not REQUIRE_COMPLETE_USED:
+        return True
+    return any(good in t for good in COMPLETE_WORDS)
+
+
 def condition_of(item):
     """
     Two buckets only, and 'used' has to genuinely mean used.
@@ -350,6 +389,8 @@ def evaluate(item, set_row):
 
     cond = condition_of(item)
     if cond is None:
+        return None
+    if cond == "used" and not used_is_complete(title):
         return None
 
     price = money(item.get("price"))
@@ -553,10 +594,38 @@ def main():
         written += len(batch)
     log(f"  wrote {written}")
 
-    # Anything that stopped appearing is sold or ended — take it off the site.
+    # Retire anything that's gone.
+    #
+    # The 48-hour sweep alone was too slow: a set sells, and its listing sits
+    # on the board for another two days pointing at a dead page. Because we
+    # just re-scanned every one of these sets, we know precisely which
+    # listings still exist — anything we didn't see this run is gone NOW.
+    try:
+        scanned_nums = sorted({r["set_num"] for r in sets})
+        seen_ids = {d["item_id"] for d in found}
+        retired_now = 0
+        for i in range(0, len(scanned_nums), 100):
+            chunk = scanned_nums[i:i + 100]
+            live = (client.table("deals")
+                    .select("item_id")
+                    .in_("set_num", chunk)
+                    .is_("gone_at", "null")
+                    .execute())
+            stale = [r["item_id"] for r in (live.data or [])
+                     if r["item_id"] not in seen_ids]
+            for j in range(0, len(stale), 100):
+                (client.table("deals")
+                 .update({"gone_at": datetime.now(timezone.utc).isoformat()})
+                 .in_("item_id", stale[j:j + 100]).execute())
+                retired_now += len(stale[j:j + 100])
+        log(f"  retired {retired_now} listings that are no longer live")
+    except Exception as exc:
+        log(f"  immediate retire skipped: {exc}")
+
+    # Backstop for sets not covered by this run.
     try:
         expired = client.rpc("expire_stale_deals").execute()
-        log(f"  expired {expired.data} listings no longer live")
+        log(f"  expired {expired.data} stale listings")
     except Exception as exc:
         log(f"  expire step skipped: {exc}")
 
