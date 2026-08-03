@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.0-retail"
+VERSION = "3.1-retail"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -258,7 +258,7 @@ def name_tokens(name, theme=None):
             if len(w) >= 4 and w not in NAME_STOP and w not in theme_words]
 
 
-def is_relevant(title, num, set_name):
+def is_relevant(title, num, set_name=None, theme=None):
     """
     The listing must plausibly BE the set.
 
