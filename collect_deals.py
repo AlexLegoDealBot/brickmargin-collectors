@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "2.3-tuned"
+VERSION = "3.0-retail"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -81,6 +81,16 @@ SUPABASE_KEY = require("SUPABASE_SERVICE_KEY")
 EBAY_APP_ID = require("EBAY_APP_ID")
 EBAY_CERT_ID = require("EBAY_CERT_ID")
 
+# Two definitions of "deal", because two kinds of people are looking.
+#
+#   RETAIL — under the set's recommended price. What a shopper means by a
+#            sale, what BrickHound-style sites show, and far more common.
+#   MARKET — under what the set already resells for. The reseller's
+#            definition: rarer, and the one worth real money.
+#
+# A listing qualifies on either, and gets flagged 'both' when it clears the
+# two — which is the genuinely exceptional case.
+MIN_RETAIL_DISCOUNT = num_env("MIN_RETAIL_DISCOUNT", 12)
 MIN_DISCOUNT = num_env("MIN_DISCOUNT", 12)
 # The ceiling matters more than the floor. Nothing sells a $1,600 set for
 # $6 — a listing that cheap is a minifigure, a manual or an empty box that
@@ -483,16 +493,28 @@ def evaluate(item, set_row):
     benchmark = value if cond == "new" else value * 0.72
 
     discount = (benchmark - total) / benchmark * 100
-    if discount < MIN_DISCOUNT:
-        return reject("discount below floor")
+
+    # --- against the retail price -----------------------------------------
+    msrp = set_row.get("msrp")
+    msrp = float(msrp) if msrp else None
+    pct_off_msrp = None
+    retail_deal = False
+    if msrp and msrp > 0 and cond == "new":
+        # Only sealed sets are compared to RRP — a used set being under
+        # retail is not news, it's the definition of used.
+        pct_off_msrp = (msrp - total) / msrp * 100
+        retail_deal = pct_off_msrp >= MIN_RETAIL_DISCOUNT
+
+    market_deal = discount >= MIN_DISCOUNT
+    if not (market_deal or retail_deal):
+        return reject("above both retail and market price")
     if discount > MAX_DISCOUNT:
         return reject("discount above ceiling")          # too good to be the set — it isn't the set
 
     # Retail-price floor. The strongest whole-set test we have, because it
     # doesn't depend on how the seller worded their title.
-    msrp = set_row.get("msrp")
     if msrp:
-        floor = float(msrp) * (MSRP_FLOOR_NEW if cond == "new" else MSRP_FLOOR_USED)
+        floor = msrp * (MSRP_FLOOR_NEW if cond == "new" else MSRP_FLOOR_USED)
         if total < floor:
             return reject("below MSRP floor")
 
@@ -522,11 +544,22 @@ def evaluate(item, set_row):
     fees = benchmark * (MARKETPLACE_PCT + PROMOTED_PCT) / 100
     net = max(0.0, benchmark - fees - SHIP_TO_BUYER)
     margin = (net - total) / total * 100 if total else 0
+    # A thin resale margin only disqualifies a market deal. A shopper buying
+    # a set to build doesn't care what it would net them on resale.
     if margin < MIN_MARGIN:
-        return reject("margin too thin")
+        market_deal = False
+        if not retail_deal:
+            return reject("margin too thin")
 
     retired = bool(set_row.get("retired_at"))
-    score = hold_score(margin, discount, set_row.get("comp_count"),
+    deal_type = ("both" if (market_deal and retail_deal)
+                 else "market" if market_deal else "retail")
+
+    # Score on whichever gap is the selling point, so a straightforward
+    # retail sale isn't punished for having no resale margin.
+    score_basis = margin if market_deal else (pct_off_msrp or 0)
+    score_gap = discount if market_deal else (pct_off_msrp or 0)
+    score = hold_score(score_basis, score_gap, set_row.get("comp_count"),
                        seller_pct, seller_count, retired)
 
     return {
@@ -534,6 +567,9 @@ def evaluate(item, set_row):
         "source": SOURCE,
         "score": score,
         "retired": retired,
+        "deal_type": deal_type,
+        "msrp": round(msrp, 2) if msrp else None,
+        "pct_off_msrp": round(pct_off_msrp, 2) if pct_off_msrp is not None else None,
         "set_num": set_row["set_num"],
         "title": title[:300],
         "condition": cond,
@@ -649,7 +685,11 @@ def main():
             bucket.append(d)
     found = [d for bucket in per_set.values() for d in bucket]
 
-    log(f"  found {len(found)} deals across {len(per_set)} sets")
+    kinds = {}
+    for d in found:
+        kinds[d["deal_type"]] = kinds.get(d["deal_type"], 0) + 1
+    log(f"  found {len(found)} deals across {len(per_set)} sets "
+        f"({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'none'})")
 
     # Why the rest didn't qualify. When the board comes back empty this is
     # the difference between tuning the right dial and guessing.
