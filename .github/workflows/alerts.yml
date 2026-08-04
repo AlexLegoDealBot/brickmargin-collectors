@@ -1,0 +1,36 @@
+name: Price Alerts
+
+# After the comps collector has had time to refresh values. Twice a day is
+# enough — an alert that arrives four times a day stops being an alert.
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe mode — print the emails, send nothing'
+        type: boolean
+        default: true
+      cooldown_hours:
+        description: 'Do not mention the same set again within this many hours'
+        default: '72'
+  schedule:
+    - cron: '0 13,1 * * *'
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Send alerts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SITE_URL: https://www.brickmargin.com
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+          COOLDOWN_HOURS: ${{ github.event.inputs.cooldown_hours || '72' }}
+        run: python send_alerts.py
