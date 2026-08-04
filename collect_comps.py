@@ -48,7 +48,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.2-theme"
+VERSION = "2.3-parts"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -67,6 +67,17 @@ JUNK_TERMS = (
     "compatible", "minifig only", "minifigure only", "figure only",
     "poster", "catalog", "magazine", "display case", "light kit",
     "incomplete", "parts only", "spare",
+    # LOOSE BRICKS AND ACCESSORIES. A set number is also a part number, so
+    # "LEGO Parts - Black Plate 3 x 3 - No 11212" carries 11212 legitimately
+    # while being a 90-cent brick. These listings priced two 2026 sets at
+    # about nine dollars each.
+    "lego parts", "parts -", "part -", "qty", "pcs)", "loose",
+    "plate 3 x 3", "technic axle", "axle 1l", "pin 2l", "friction ridge",
+    "connector bush", "cross axle", "brick 1 x", "plate 1 x", "plate 2 x",
+    "tile 1 x", "slope", "bulk", "grab bag", "by the pound",
+    "minifig", "minifigure", "figure from", "display frame", "display board",
+    "display stand", "acrylic", "led light", "lighting kit", "battery",
+    "batteries", "power functions",
     # Third-party builds sold under the set's number
     "display build", "display model",
     # MULTI-UNIT LISTINGS. "Lot of 2" at $25.75 against a $13 median is two
@@ -249,6 +260,24 @@ def name_tokens(name, theme=None):
     theme_words = set(re.findall(r"[a-z0-9]+", (theme or "").lower()))
     return [w for w in words
             if len(w) >= 4 and w not in NAME_STOP and w not in theme_words]
+
+
+# Part listings have a grammar of their own: a quantity, a colour, a
+# dimension. Any one of these is a strong signal that what's for sale is a
+# handful of bricks rather than a boxed set.
+PART_SHAPES = (
+    r"\bqty\s*[:.]?\s*\d+",
+    r"\bx\s?\d{1,3}\s*(pcs|pieces|parts|bricks)\b",
+    r"\b\d{1,3}\s*(pcs|pieces|parts|bricks)\b\s*$",
+    r"\b\d\s*x\s*\d\b.*\b(plate|brick|tile|slope|panel)\b",
+    r"\b(plate|brick|tile|slope|axle|pin|bush|connector)\b.*\bno\.?\s*\d{4,7}\b",
+    r"\blot of\s*\d+",
+)
+
+
+def looks_like_parts(title):
+    t = (title or "").lower()
+    return any(re.search(p, t) for p in PART_SHAPES)
 
 
 def is_relevant(title, num, set_name=None, theme=None):
@@ -479,7 +508,7 @@ def main():
             attempted.append(set_num)
             continue
 
-        row, kept, sample = summarize(items, set_num)
+        row, kept, sample = summarize(items, set_num, s.get("name"), s.get("theme"))
         attempted.append(set_num)
 
         if PROBE:
