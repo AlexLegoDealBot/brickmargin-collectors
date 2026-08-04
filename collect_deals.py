@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.1-retail"
+VERSION = "3.2-accessory"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -213,6 +213,19 @@ JUNK = (
     "magnet", "pen", "shirt", "mug", "custom", "compatible", "knock",
     "knockoff", "moc", "lot of", "bundle", "job lot", "choose", "pick your",
     "you pick", "select", "assorted", "random",
+    # ACCESSORIES SOLD ALONGSIDE A SET. Each of these was found on the live
+    # board: batteries for the Holiday Express, a display board for a Ferrari,
+    # a gift-with-purchase listed under a different set's number. They carry
+    # the set number and the set's name because they are genuinely FOR that
+    # set — which is exactly why name matching alone can't catch them.
+    "battery", "batteries", "aaa", "power functions", "powered up",
+    "motor kit", "light kit", "lighting kit", "led kit", "usb",
+    "display board", "display base", "display stand", "display case",
+    "display frame", "acrylic", "plexiglass", "showcase", "vitrine",
+    "wall mount", "wall bracket", "shelf", "riser", "plaque", "nameplate",
+    "dust cover", "storage box", "carrying case",
+    "gift with purchase", "gwp", "promo item", "promotional item",
+    "free gift", "insert only", "manual only", "extras",
     # PART OF A SET, sold as its own item. These listings are honest — the
     # seller says exactly what they have — so the only failure was ours in
     # not reading it. A Charizard from set 72153 carries the set number AND
@@ -511,12 +524,21 @@ def evaluate(item, set_row):
     if discount > MAX_DISCOUNT:
         return reject("discount above ceiling")          # too good to be the set — it isn't the set
 
-    # Retail-price floor. The strongest whole-set test we have, because it
-    # doesn't depend on how the seller worded their title.
+    # Price floor — the strongest whole-set test we have, because it doesn't
+    # depend on how the seller worded their title.
+    #
+    # Sets with no MSRP on file used to skip this check entirely, which is how
+    # a $12 pack of batteries for a train set reached the board. When retail
+    # is unknown, the set's own market value stands in: nothing selling at a
+    # third of what the set is worth is the set.
     if msrp:
         floor = msrp * (MSRP_FLOOR_NEW if cond == "new" else MSRP_FLOOR_USED)
         if total < floor:
             return reject("below MSRP floor")
+    else:
+        floor = value * (0.35 if cond == "new" else 0.22)
+        if total < floor:
+            return reject("below value floor (no MSRP on file)")
 
     # --- who is selling it -------------------------------------------------
     seller_node = item.get("seller") or {}
