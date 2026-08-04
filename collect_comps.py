@@ -48,7 +48,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.3-parts"
+VERSION = "2.4-polybag"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -75,7 +75,9 @@ JUNK_TERMS = (
     "plate 3 x 3", "technic axle", "axle 1l", "pin 2l", "friction ridge",
     "connector bush", "cross axle", "brick 1 x", "plate 1 x", "plate 2 x",
     "tile 1 x", "slope", "bulk", "grab bag", "by the pound",
-    "minifig", "minifigure", "figure from", "display frame", "display board",
+    "minifig only", "minifigure only", "minifig lot", "minifigure lot",
+    "loose minifig", "minifigs from", "minifigures from", "figure from",
+    "display frame", "display board",
     "display stand", "acrylic", "led light", "lighting kit", "battery",
     "batteries", "power functions",
     # Third-party builds sold under the set's number
