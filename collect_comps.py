@@ -38,6 +38,7 @@ ENVIRONMENT VARIABLES
 
 import base64
 import os
+import re
 import statistics
 import sys
 import time
@@ -47,7 +48,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.1-theme"
+VERSION = "2.2-theme"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
