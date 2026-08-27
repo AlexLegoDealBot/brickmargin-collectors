@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.0"
+VERSION = "1.1-preflight"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -57,7 +57,11 @@ def require(name):
 
 SUPABASE_URL = require("SUPABASE_URL")
 SUPABASE_KEY = require("SUPABASE_SERVICE_KEY")
-RESEND_KEY = require("RESEND_API_KEY")
+RESEND_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+if not RESEND_KEY and os.environ.get("PROBE", "true").strip().lower() == "false":
+    sys.exit("ERROR: RESEND_API_KEY is required to send. Add it to the "
+             "collectors repo: Settings -> Secrets and variables -> Actions. "
+             "(Probe mode runs without it.)")
 ALERT_FROM = os.environ.get("ALERT_FROM") or "BrickMargin <alerts@brickmargin.com>"
 SITE_URL = (os.environ.get("SITE_URL") or "https://www.brickmargin.com").rstrip("/")
 COOLDOWN_HOURS = int(os.environ.get("COOLDOWN_HOURS") or 72)
@@ -144,9 +148,48 @@ background:#f8f4ec;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif
     return html, text
 
 
+def preflight(client):
+    """
+    Check every table and column this run depends on, and say plainly which
+    one is missing.
+
+    The first version assumed the schema was in place and crashed with a raw
+    PostgREST traceback if it wasn't — which tells you a request failed but
+    not which migration you skipped. A scheduled job that fails silently for
+    weeks is worse than one that never ran, so this names the problem and the
+    fix in one line.
+    """
+    problems = []
+
+    checks = [
+        ("watches", "user_id,set_num,active", "migration_007_auth.sql"),
+        ("profiles", "id,email,alert_email,alert_price,alert_discount,alert_drop_pct",
+         "migration_012_alerts.sql (adds alert_drop_pct)"),
+        ("alerts_sent", "id,user_id,set_num,kind,sent_at", "migration_012_alerts.sql"),
+        ("set_values", "set_num,name,market_value,comp_count,msrp", "migration_003"),
+        ("live_deals", "set_num,total_price,deal_type", "migration_011_retail_deals.sql"),
+        ("comps", "set_num,observed_at,median_sold,comp_count", "migration_001"),
+    ]
+    for table, cols, fix in checks:
+        try:
+            client.table(table).select(cols).limit(1).execute()
+        except Exception as exc:
+            problems.append(f"{table}: {str(exc)[:150]}  → run {fix}")
+
+    return problems
+
+
 def main():
     log(f"BrickMargin alert sender — version {VERSION}  probe={PROBE}")
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    problems = preflight(client)
+    if problems:
+        log("  PREFLIGHT FAILED — the schema isn\u2019t ready for alerts:")
+        for pr in problems:
+            log(f"    {pr}")
+        sys.exit("Fix the above, then re-run. Nothing was sent.")
+    log("  preflight ok — all tables and columns present")
 
     watches = (client.table("watches")
                .select("user_id,set_num")
@@ -310,9 +353,16 @@ def main():
         log(f"  PROBE — {len(sent_rows)} alerts would go out, nothing sent or logged")
         return
 
+    # Log what actually went out. If this fails we\u2019d re-send the same
+    # alerts next run, so it\u2019s worth shouting about — but the emails are
+    # already delivered, so failing the job here helps nobody.
     if sent_rows:
-        for i in range(0, len(sent_rows), 200):
-            client.table("alerts_sent").insert(sent_rows[i:i + 200]).execute()
+        try:
+            for i in range(0, len(sent_rows), 200):
+                client.table("alerts_sent").insert(sent_rows[i:i + 200]).execute()
+        except Exception as exc:
+            log(f"  WARNING: emails sent but the log write failed: {exc}")
+            log("  the same alerts may repeat next run")
     log(f"  {emails} emails sent · {len(sent_rows)} alerts logged")
     log("Done.")
 
