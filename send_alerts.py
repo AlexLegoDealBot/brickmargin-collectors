@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.1-preflight"
+VERSION = "1.2-dates"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -75,6 +75,27 @@ def log(msg):
 
 def usd(n):
     return f"${round(float(n)):,}"
+
+
+def as_utc(value):
+    """
+    Parse a Postgres timestamp or date into an aware UTC datetime.
+
+    retired_at is a DATE — "2018-12-05" — so fromisoformat returns a naive
+    datetime, and subtracting an aware now() raises TypeError. Timestamps
+    from timestamptz columns arrive aware and with a trailing Z that older
+    Pythons won't parse. Both cases funnel through here so no caller has to
+    know which kind of column it's holding.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def send_email(to, subject, html, text):
@@ -315,9 +336,9 @@ def main():
 
             # --- leaving production ---
             iso = retiring.get(set_num)
-            if iso:
-                days = (datetime.fromisoformat(iso.replace("Z", "+00:00"))
-                        - datetime.now(timezone.utc)).days
+            retire_dt = as_utc(iso)
+            if retire_dt:
+                days = (retire_dt - datetime.now(timezone.utc)).days
                 if 0 < days <= RETIRE_DAYS:
                     key = (uid, set_num, "retiring")
                     if key not in recent:
