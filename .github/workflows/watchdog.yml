@@ -1,0 +1,42 @@
+name: Daily Health Check
+
+# Runs after the overnight collectors have had their turn, so a failure
+# overnight is in your inbox before you start the day.
+#
+# It emails ONLY when something is wrong. A watchdog that mails you every
+# morning with good news trains you to archive it unread, and then it has
+# cost you the very thing it was built for.
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe — print the report, send no email'
+        type: boolean
+        default: true
+      always_send:
+        description: 'Email even when everything is healthy'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 12 * * *'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Check everything
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          SITE_URL: https://www.brickmargin.com
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+          ALWAYS_SEND: ${{ github.event.inputs.always_send || 'false' }}
+        run: python watchdog.py
