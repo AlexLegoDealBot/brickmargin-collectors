@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.2-accessory"
+VERSION = "3.4-flags"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -222,10 +222,18 @@ JUNK = (
     "motor kit", "light kit", "lighting kit", "led kit", "usb",
     "display board", "display base", "display stand", "display case",
     "display frame", "acrylic", "plexiglass", "showcase", "vitrine",
-    "wall mount", "wall bracket", "shelf", "riser", "plaque", "nameplate",
+    "wall mount", "wall bracket", "display shelf", "riser", "plaque",
+    "nameplate",
     "dust cover", "storage box", "carrying case",
     "gift with purchase", "gwp", "promo item", "promotional item",
     "free gift", "insert only", "manual only", "extras",
+    # CONTENTS MISSING — these mean you are not getting the whole set, so
+    # they stay hard rejections. Cosmetic box damage is handled separately:
+    # a battered box on a complete set is a genuine bargain, and filtering it
+    # out would throw away good deals to avoid a cosmetic caveat.
+    "no minifigure", "no minifigs", "no figures", "figures not included",
+    "missing sticker", "no stickers", "stickers missing", "no instruction",
+    "water damage", "mold", "mould", "crushed set",
     # PART OF A SET, sold as its own item. These listings are honest — the
     # seller says exactly what they have — so the only failure was ours in
     # not reading it. A Charizard from set 72153 carries the set number AND
@@ -293,6 +301,11 @@ def is_relevant(title, num, set_name=None, theme=None):
         if bad in t:
             return False, bad
 
+    # A seller shouting READ, or admitting "as-is", is telling us something
+    # is wrong with this particular copy. Honour it.
+    if has_caveat(t):
+        return False, "seller says something is missing"
+
     tokens = name_tokens(set_name, theme)
     if tokens:
         hits = sum(1 for tok in tokens if tok in t)
@@ -343,6 +356,49 @@ INCOMPLETE_WORDS = (
     "not verified", "may be missing", "possibly missing", "no instructions",
     "without instructions", "no manual", "some pieces", "few pieces",
 )
+
+
+# A seller shouting READ is warning you about something. It is the single
+# most reliable distress signal in a listing title, and it costs us almost
+# nothing to honour: a genuinely clean set has no reason to carry it.
+# Two different things, deliberately kept apart.
+#
+# BLOCKING — the seller is telling you something is absent or unusable. No
+# amount of discount makes an incomplete set the set we priced.
+BLOCKING_PATTERNS = (
+    r"\bas[\s-]is\b",
+    r"\bfor\s+parts\b",
+    r"\bincomplete\b",
+    r"\bpartial\b",
+    r"\bmissing\b",
+    r"\bnot\s+complete\b",
+)
+
+# FLAGGING — the box has been through something, but the set inside is
+# whole. These stay on the board with a note, because a scuffed box at a
+# discount is a real find for anyone planning to open it anyway. The buyer
+# decides; we just refuse to hide it.
+FLAG_PATTERNS = (
+    (r"box\s*damage|damaged\s*box|crushed\s*box|torn\s*box|dented\s*box",
+     "Box damage"),
+    (r"shelf\s*wear|box\s*wear|worn\s*box", "Box wear"),
+    (r"opened\s*box|box\s*opened|resealed|re-sealed", "Box opened"),
+    (r"\*+\s*read\s*\*+|\bplease\s+read\b|\bread\s+(first|carefully|description)\b",
+     "Seller says read the listing"),
+    (r"\bsee\s+(description|details|photos?|pics?)\b", "See the description"),
+)
+
+
+def has_caveat(title):
+    """True only when the seller says something is missing or unusable."""
+    t = (title or "").lower()
+    return any(re.search(p, t) for p in BLOCKING_PATTERNS)
+
+
+def condition_flags(title):
+    """Cosmetic warnings worth showing beside a deal, not hiding it for."""
+    t = (title or "").lower()
+    return [label for pat, label in FLAG_PATTERNS if re.search(pat, t)]
 
 
 def looks_partial(title):
@@ -536,7 +592,7 @@ def evaluate(item, set_row):
         if total < floor:
             return reject("below MSRP floor")
     else:
-        floor = value * (0.35 if cond == "new" else 0.22)
+        floor = value * (0.48 if cond == "new" else 0.30)
         if total < floor:
             return reject("below value floor (no MSRP on file)")
 
