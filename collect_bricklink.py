@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.1-diagnose"
+VERSION = "1.2-skip404"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -114,7 +114,7 @@ def sign(method, url, params):
     return header
 
 
-def call(path, params=None, verbose=False):
+def call(path, params=None, verbose=False, missing_is_404=False):
     """
     One signed GET.
 
@@ -170,13 +170,18 @@ def call(path, params=None, verbose=False):
                 "That set is not in BrickLink's catalogue under this number.",
         }
         desc = meta.get("description") or meta.get("message") or ""
-        log(f"    BrickLink says: {code} — {desc}")
+        # 404s are routine: catalogues disagree at the edges. Counted at the
+        # end rather than shouted about forty times a run.
+        if not (missing_is_404 and code == 404):
+            log(f"    BrickLink says: {code} — {desc}")
         if code in hints:
             log(f"    → {hints[code]}")
+        if missing_is_404 and code == 404:
+            return "NOT_IN_CATALOGUE"
         return None
 
     if resp.status_code == 404:
-        return None
+        return "NOT_IN_CATALOGUE" if missing_is_404 else None
     if resp.status_code != 200:
         log(f"    HTTP {resp.status_code} on {path}")
         return None
@@ -205,8 +210,8 @@ def price_guide(set_num, condition, guide_type="sold"):
         "new_or_used": condition,          # N or U
         "currency_code": "USD",
         "country_code": "US",
-    })
-    if data in (None, "RATE_LIMIT"):
+    }, missing_is_404=True)
+    if data in (None, "RATE_LIMIT", "NOT_IN_CATALOGUE"):
         return data
 
     def num(key):
@@ -270,10 +275,25 @@ def main():
             log("  RATE LIMITED — stopping cleanly with what we have")
             break
         time.sleep(PAUSE)
+
+        # A 404 means the number is not in BrickLink's catalogue at all —
+        # promotional codes, trading cards, internal LEGO part numbers. Asking
+        # again for the used price wastes a call on a question already
+        # answered, and those were 7% of the budget.
+        if new == "NOT_IN_CATALOGUE":
+            missing += 1
+            rows.append({
+                "set_num": set_num,
+                "bricklink_checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+            continue
+
         used = price_guide(set_num, "U")
         if used == "RATE_LIMIT":
             log("  RATE LIMITED — stopping cleanly with what we have")
             break
+        if used == "NOT_IN_CATALOGUE":
+            used = None
         time.sleep(PAUSE)
 
         if not new and not used:
