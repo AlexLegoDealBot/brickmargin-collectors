@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.2-skip404"
+VERSION = "1.3-update"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -337,12 +337,29 @@ def main():
         log("  PROBE — nothing written")
         return
 
-    written = 0
-    for i in range(0, len(rows), 100):
-        batch = rows[i:i + 100]
-        client.table("sets").upsert(batch, on_conflict="set_num").execute()
-        written += len(batch)
-    log(f"  wrote {written}")
+    # UPDATE, not upsert.
+    #
+    # Postgres builds the candidate row and checks NOT NULL *before* it
+    # detects the conflict and switches to an update, so a partial payload of
+    # {set_num, sold_new, ...} fails on `name` being null even though the set
+    # already exists. The catalog collector hit this exact wall in July and
+    # solved it by merging the full row into the payload — but here that would
+    # mean fetching every set first just to satisfy a constraint.
+    #
+    # These sets always exist already (we read them from `sets` to build the
+    # batch), so an update is both correct and simpler: it touches only the
+    # columns we actually measured and never constructs a candidate row.
+    written, failed = 0, 0
+    for row in rows:
+        payload = {k: v for k, v in row.items() if k != "set_num"}
+        try:
+            client.table("sets").update(payload).eq("set_num", row["set_num"]).execute()
+            written += 1
+        except Exception as exc:
+            failed += 1
+            if failed <= 3:
+                log(f"  {row['set_num']}: {str(exc)[:120]}")
+    log(f"  wrote {written}" + (f", {failed} failed" if failed else ""))
     log("Done.")
 
 
