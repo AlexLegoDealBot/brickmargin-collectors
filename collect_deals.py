@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.4-flags"
+VERSION = "3.5-forset"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -221,7 +221,9 @@ JUNK = (
     "battery", "batteries", "aaa", "power functions", "powered up",
     "motor kit", "light kit", "lighting kit", "led kit", "usb",
     "display board", "display base", "display stand", "display case",
-    "display frame", "acrylic", "plexiglass", "showcase", "vitrine",
+    "display frame", "display wall", "wallboard", "wall board", "wall art",
+    "acrylic", "plexiglass", "showcase", "vitrine",
+    "hub for", "adapter", "power adapter", "charger",
     "wall mount", "wall bracket", "display shelf", "riser", "plaque",
     "nameplate",
     "dust cover", "storage box", "carrying case",
@@ -305,6 +307,9 @@ def is_relevant(title, num, set_name=None, theme=None):
     # is wrong with this particular copy. Honour it.
     if has_caveat(t):
         return False, "seller says something is missing"
+
+    if sold_for_another_set(t, num):
+        return False, "an accessory sold FOR this set, not the set"
 
     tokens = name_tokens(set_name, theme)
     if tokens:
@@ -399,6 +404,23 @@ def condition_flags(title):
     """Cosmetic warnings worth showing beside a deal, not hiding it for."""
     t = (title or "").lower()
     return [label for pat, label in FLAG_PATTERNS if re.search(pat, t)]
+
+
+# The giveaway both of these shared: the set number comes AFTER the word
+# "for". "Display Wallboard for LEGO Technic Ferrari 42207" and "88009 HUB
+# FOR 10361" are accessories sold to go WITH a set, and they carry the set's
+# number and often its name — so nothing else we check catches them. But the
+# grammar is unmistakable, and it generalises to every accessory phrased this
+# way rather than needing a word added each time one slips through.
+def sold_for_another_set(title, num):
+    t = (title or "").lower()
+    m = re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t)
+    if not m:
+        return False
+    before = t[:m.start()]
+    # "…for LEGO Technic Ferrari SF-24 42207" — "for" shortly before the
+    # number, with only product words between.
+    return bool(re.search(r"\bfor\b[\w\s:&'/-]{0,40}$", before))
 
 
 def looks_partial(title):
