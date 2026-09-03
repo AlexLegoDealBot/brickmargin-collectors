@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.4-faster"
+VERSION = "1.5-images"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -70,7 +70,7 @@ TOKEN_SECRET = require("BRICKLINK_TOKEN_SECRET")
 # runs is ~3,600/day — comfortably inside the limit with room for retries,
 # and it sweeps the whole 6,800-set catalogue in about three days rather
 # than a fortnight.
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 500)
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 400)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 PAUSE = 0.35
 
@@ -275,6 +275,23 @@ def main():
 
     for i, s in enumerate(targets, 1):
         set_num = s["set_num"]
+        # The catalogue entry first: it carries the product photograph, and
+        # a 404 here means the set isn't on BrickLink at all, so we skip the
+        # price calls entirely.
+        item = call(f"/items/SET/{bl_number(set_num)}", missing_is_404=True)
+        if item == "RATE_LIMIT":
+            log("  RATE LIMITED — stopping cleanly with what we have")
+            break
+        if item == "NOT_IN_CATALOGUE" or item is None:
+            missing += 1
+            rows.append({"set_num": set_num,
+                         "bricklink_checked_at": datetime.now(timezone.utc).isoformat()})
+            time.sleep(PAUSE)
+            continue
+        img = item.get("image_url") or ""
+        bl_image = ("https:" + img) if img.startswith("//") else (img or None)
+        time.sleep(PAUSE)
+
         new = price_guide(set_num, "N")
         if new == "RATE_LIMIT":
             log("  RATE LIMITED — stopping cleanly with what we have")
@@ -312,6 +329,7 @@ def main():
         row = {
             "set_num": set_num,
             "bricklink_checked_at": datetime.now(timezone.utc).isoformat(),
+            "bricklink_image": bl_image,
         }
         if new:
             row.update({
