@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.0"
+VERSION = "1.1-diagnose"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -114,8 +114,15 @@ def sign(method, url, params):
     return header
 
 
-def call(path, params=None):
-    """One signed GET. Returns the `data` object, or None."""
+def call(path, params=None, verbose=False):
+    """
+    One signed GET.
+
+    BrickLink returns its real reason inside a `meta` object rather than in
+    the HTTP status, so a failure looks identical to an empty result unless
+    you read the body. `verbose` prints that body — the difference between
+    "something went wrong" and "TOKEN_IP_MISMATCHED".
+    """
     params = params or {}
     url = f"{API}{path}"
     try:
@@ -128,22 +135,52 @@ def call(path, params=None):
         log(f"    request failed: {exc}")
         return None
 
-    if resp.status_code == 401:
-        log("    401 — check the four BrickLink secrets, and that the access "
-            "token's allowed IP is 0.0.0.0")
-        return None
-    if resp.status_code == 404:
-        return None                       # set genuinely not in their catalogue
+    if verbose:
+        log(f"    HTTP {resp.status_code}")
+        log(f"    body: {resp.text[:400]}")
+
     if resp.status_code == 429:
         return "RATE_LIMIT"
+
+    try:
+        body = resp.json()
+    except Exception:
+        if verbose:
+            log("    response was not JSON — that usually means the request "
+                "never reached the API")
+        return None
+
+    meta = body.get("meta", {}) or {}
+    code = meta.get("code")
+
+    if code and code != 200:
+        # These are the ones worth naming, because each has a different fix.
+        hints = {
+            "TOKEN_IP_MISMATCHED":
+                "The access token is locked to an IP. GitHub Actions runs from "
+                "changing addresses — set the token's allowed IP to 0.0.0.0 "
+                "with mask 255.255.255.255.",
+            "BAD_OAUTH_REQUEST":
+                "The signature was rejected. Usually one of the four secrets "
+                "has a stray space or newline, or was renewed after being "
+                "saved to GitHub.",
+            "PERMISSION_DENIED":
+                "The credentials are valid but not permitted for this call.",
+            "RESOURCE_NOT_FOUND":
+                "That set is not in BrickLink's catalogue under this number.",
+        }
+        desc = meta.get("description") or meta.get("message") or ""
+        log(f"    BrickLink says: {code} — {desc}")
+        if code in hints:
+            log(f"    → {hints[code]}")
+        return None
+
+    if resp.status_code == 404:
+        return None
     if resp.status_code != 200:
         log(f"    HTTP {resp.status_code} on {path}")
         return None
 
-    body = resp.json()
-    meta = body.get("meta", {})
-    if meta.get("code") not in (200, None):
-        return None
     return body.get("data")
 
 
@@ -198,15 +235,23 @@ def main():
 
     # Credentials first: a clear failure here beats 180 silent 401s.
     log("  checking credentials…")
-    probe = call("/items/SET/10276-1/price", {
-        "guide_type": "sold", "new_or_used": "N",
-        "currency_code": "USD", "country_code": "US",
-    })
-    if probe in (None, "RATE_LIMIT"):
-        sys.exit("ERROR: BrickLink rejected the credentials, or the test set "
-                 "returned nothing. Check all four secrets and that the "
-                 "access token allows 0.0.0.0.")
-    log("  credentials accepted")
+
+    # Confirm the secrets arrived intact before blaming the signature. A
+    # trailing newline pasted into a GitHub secret is invisible and breaks
+    # the signature in a way that looks exactly like a wrong key.
+    for name, val in (("CONSUMER_KEY", CONSUMER_KEY), ("CONSUMER_SECRET", CONSUMER_SECRET),
+                      ("TOKEN", TOKEN), ("TOKEN_SECRET", TOKEN_SECRET)):
+        clean = val.strip()
+        flag = "" if clean == val else "  ← has whitespace around it"
+        log(f"    {name}: {len(clean)} chars, starts {clean[:4]}…{flag}")
+
+    # The simplest authenticated call there is — no set number involved, so a
+    # failure here is definitely credentials rather than a catalogue miss.
+    who = call("/items/SET/10276-1", verbose=True)
+    if who is None:
+        sys.exit("ERROR: the credential check failed. The BrickLink response "
+                 "above says why.")
+    log(f"  credentials accepted — catalogue reachable ({who.get('name', '?')})")
 
     # Sets we haven't priced from BrickLink yet, or priced longest ago.
     resp = (client.table("sets")
