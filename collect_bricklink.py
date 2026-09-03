@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.3-update"
+VERSION = "1.4-faster"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -65,7 +65,12 @@ CONSUMER_SECRET = require("BRICKLINK_CONSUMER_SECRET")
 TOKEN = require("BRICKLINK_TOKEN")
 TOKEN_SECRET = require("BRICKLINK_TOKEN_SECRET")
 
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 180)
+# BrickLink allows 5,000 calls a day. At ~1.8 calls per set (the second is
+# skipped when a set isn't in their catalogue), 500 sets per run across four
+# runs is ~3,600/day — comfortably inside the limit with room for retries,
+# and it sweeps the whole 6,800-set catalogue in about three days rather
+# than a fortnight.
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 500)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 PAUSE = 0.35
 
