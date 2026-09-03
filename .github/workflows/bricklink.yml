@@ -1,0 +1,39 @@
+name: BrickLink Sold Prices
+
+# BrickLink allows 5,000 calls a day. Two per set (new and used) means a
+# 180-set batch costs 360 calls, so four runs a day sits comfortably inside
+# the limit while sweeping the catalogue over a few weeks.
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: 'Probe — print what it finds, write nothing'
+        type: boolean
+        default: true
+      batch_size:
+        description: 'Sets per run'
+        default: '180'
+  schedule:
+    - cron: '40 3,9,15,21 * * *'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Fetch sold prices
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BRICKLINK_CONSUMER_KEY: ${{ secrets.BRICKLINK_CONSUMER_KEY }}
+          BRICKLINK_CONSUMER_SECRET: ${{ secrets.BRICKLINK_CONSUMER_SECRET }}
+          BRICKLINK_TOKEN: ${{ secrets.BRICKLINK_TOKEN }}
+          BRICKLINK_TOKEN_SECRET: ${{ secrets.BRICKLINK_TOKEN_SECRET }}
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '180' }}
+        run: python collect_bricklink.py

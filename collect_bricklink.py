@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""
+BrickMargin · BrickLink price guide collector
+=============================================
+
+Fetches **completed transaction prices** — what sets actually sold for, not
+what sellers are asking.
+
+This is the most significant accuracy upgrade the site has had. Everything
+until now has been built on live eBay listings, which systematically overstate
+value because unsold listings linger while sales disappear from view. We have
+said so plainly on the site and in our own research. BrickLink publishes six
+months of real completed sales, split by condition, and that is a different
+class of data.
+
+What it writes, per set:
+  sold_new / sold_used     — six-month average sale price by condition
+  sold_new_qty / used_qty  — how many actually sold, which is the sample size
+  sold_min / sold_max      — the range those sales fell in
+  part_out_value           — what the individual parts are worth
+
+Authentication is OAuth 1.0a, signed per request. BrickLink is stricter than
+the other APIs we use: the signature covers the method, the URL and every
+query parameter in sorted order, and any mismatch returns a bare 401 with no
+explanation. The signing code below is therefore deliberately explicit.
+
+Environment
+-----------
+  SUPABASE_URL, SUPABASE_SERVICE_KEY        required
+  BRICKLINK_CONSUMER_KEY, ..._SECRET        required
+  BRICKLINK_TOKEN, ..._TOKEN_SECRET         required
+  BATCH_SIZE      default 180 — sets per run (BrickLink allows 5,000/day)
+  PROBE           default true — print, write nothing
+"""
+
+import hashlib
+import hmac
+import os
+import random
+import sys
+import time
+import urllib.parse
+from datetime import datetime, timezone
+
+import requests
+from supabase import create_client
+
+VERSION = "1.0"
+
+API = "https://api.bricklink.com/api/store/v1"
+
+
+def require(name):
+    v = os.environ.get(name, "").strip()
+    if not v:
+        sys.exit(f"ERROR: {name} is required. Add it to the collectors repo "
+                 f"under Settings → Secrets and variables → Actions.")
+    return v
+
+
+SUPABASE_URL = require("SUPABASE_URL")
+SUPABASE_KEY = require("SUPABASE_SERVICE_KEY")
+CONSUMER_KEY = require("BRICKLINK_CONSUMER_KEY")
+CONSUMER_SECRET = require("BRICKLINK_CONSUMER_SECRET")
+TOKEN = require("BRICKLINK_TOKEN")
+TOKEN_SECRET = require("BRICKLINK_TOKEN_SECRET")
+
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 180)
+PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
+PAUSE = 0.35
+
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def quote(value):
+    """Percent-encoding per RFC 5849 — stricter than urlencode's default."""
+    return urllib.parse.quote(str(value), safe="~")
+
+
+def sign(method, url, params):
+    """
+    Build an OAuth 1.0a signature.
+
+    Every query parameter must appear in the base string, sorted by key, and
+    percent-encoded twice over by the time it reaches the header. Getting any
+    of that subtly wrong returns 401 with no hint as to which part, so this is
+    written out step by step rather than cleverly.
+    """
+    oauth = {
+        "oauth_consumer_key": CONSUMER_KEY,
+        "oauth_token": TOKEN,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_nonce": f"{random.getrandbits(64):x}",
+        "oauth_version": "1.0",
+    }
+
+    everything = {**params, **oauth}
+    normalised = "&".join(
+        f"{quote(k)}={quote(everything[k])}" for k in sorted(everything)
+    )
+    base = "&".join([method.upper(), quote(url), quote(normalised)])
+    key = f"{quote(CONSUMER_SECRET)}&{quote(TOKEN_SECRET)}"
+    digest = hmac.new(key.encode(), base.encode(), hashlib.sha1).digest()
+
+    import base64
+    oauth["oauth_signature"] = base64.b64encode(digest).decode()
+
+    header = "OAuth " + ", ".join(
+        f'{quote(k)}="{quote(v)}"' for k, v in sorted(oauth.items())
+    )
+    return header
+
+
+def call(path, params=None):
+    """One signed GET. Returns the `data` object, or None."""
+    params = params or {}
+    url = f"{API}{path}"
+    try:
+        resp = requests.get(
+            url, params=params,
+            headers={"Authorization": sign("GET", url, params)},
+            timeout=30,
+        )
+    except Exception as exc:
+        log(f"    request failed: {exc}")
+        return None
+
+    if resp.status_code == 401:
+        log("    401 — check the four BrickLink secrets, and that the access "
+            "token's allowed IP is 0.0.0.0")
+        return None
+    if resp.status_code == 404:
+        return None                       # set genuinely not in their catalogue
+    if resp.status_code == 429:
+        return "RATE_LIMIT"
+    if resp.status_code != 200:
+        log(f"    HTTP {resp.status_code} on {path}")
+        return None
+
+    body = resp.json()
+    meta = body.get("meta", {})
+    if meta.get("code") not in (200, None):
+        return None
+    return body.get("data")
+
+
+def bl_number(set_num):
+    """
+    BrickLink numbers sets as "10312-1"; our catalogue already matches, but
+    older imports sometimes lack the variant, and BrickLink rejects those.
+    """
+    return set_num if "-" in set_num else f"{set_num}-1"
+
+
+def price_guide(set_num, condition, guide_type="sold"):
+    """
+    Six months of completed sales for one set in one condition.
+
+    guide_type 'sold' is the whole point of this collector — 'stock' would
+    return current asking prices, which is what we already have from eBay and
+    is precisely the weaker data.
+    """
+    data = call(f"/items/SET/{bl_number(set_num)}/price", {
+        "guide_type": guide_type,
+        "new_or_used": condition,          # N or U
+        "currency_code": "USD",
+        "country_code": "US",
+    })
+    if data in (None, "RATE_LIMIT"):
+        return data
+
+    def num(key):
+        try:
+            return float(data.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    qty = data.get("total_quantity") or 0
+    if not qty:
+        return None
+
+    return {
+        "avg": num("avg_price"),
+        "qty_avg": num("qty_avg_price"),   # weighted by quantity sold
+        "min": num("min_price"),
+        "max": num("max_price"),
+        "qty": int(qty),
+        "lots": int(data.get("unit_quantity") or 0),
+    }
+
+
+def main():
+    log(f"BrickMargin BrickLink collector — version {VERSION}  probe={PROBE}")
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    # Credentials first: a clear failure here beats 180 silent 401s.
+    log("  checking credentials…")
+    probe = call("/items/SET/10276-1/price", {
+        "guide_type": "sold", "new_or_used": "N",
+        "currency_code": "USD", "country_code": "US",
+    })
+    if probe in (None, "RATE_LIMIT"):
+        sys.exit("ERROR: BrickLink rejected the credentials, or the test set "
+                 "returned nothing. Check all four secrets and that the "
+                 "access token allows 0.0.0.0.")
+    log("  credentials accepted")
+
+    # Sets we haven't priced from BrickLink yet, or priced longest ago.
+    resp = (client.table("sets")
+            .select("set_num,name,bricklink_checked_at")
+            .order("bricklink_checked_at", desc=False, nullsfirst=True)
+            .limit(BATCH_SIZE).execute())
+    targets = resp.data or []
+    log(f"  {len(targets)} sets queued (least recently checked first)")
+
+    rows, priced, missing = [], 0, 0
+
+    for i, s in enumerate(targets, 1):
+        set_num = s["set_num"]
+        new = price_guide(set_num, "N")
+        if new == "RATE_LIMIT":
+            log("  RATE LIMITED — stopping cleanly with what we have")
+            break
+        time.sleep(PAUSE)
+        used = price_guide(set_num, "U")
+        if used == "RATE_LIMIT":
+            log("  RATE LIMITED — stopping cleanly with what we have")
+            break
+        time.sleep(PAUSE)
+
+        if not new and not used:
+            missing += 1
+            rows.append({
+                "set_num": set_num,
+                "bricklink_checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+            continue
+
+        row = {
+            "set_num": set_num,
+            "bricklink_checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if new:
+            row.update({
+                "sold_new": round(new["qty_avg"] or new["avg"] or 0, 2),
+                "sold_new_qty": new["qty"],
+                "sold_new_min": round(new["min"] or 0, 2),
+                "sold_new_max": round(new["max"] or 0, 2),
+            })
+        if used:
+            row.update({
+                "sold_used": round(used["qty_avg"] or used["avg"] or 0, 2),
+                "sold_used_qty": used["qty"],
+            })
+        rows.append(row)
+        priced += 1
+
+        if PROBE and priced <= 12:
+            n = f"${row.get('sold_new', 0):.2f} ({row.get('sold_new_qty', 0)} sold)" if new else "—"
+            u = f"${row.get('sold_used', 0):.2f} ({row.get('sold_used_qty', 0)} sold)" if used else "—"
+            log(f"    {set_num:>10}  new {n:<22} used {u}")
+
+        if i % 40 == 0:
+            log(f"  {i}/{len(targets)} · {priced} with sold data · {missing} without")
+
+    log(f"  {priced} sets have completed-sale prices, {missing} have none on record")
+
+    if PROBE:
+        log("  PROBE — nothing written")
+        return
+
+    written = 0
+    for i in range(0, len(rows), 100):
+        batch = rows[i:i + 100]
+        client.table("sets").upsert(batch, on_conflict="set_num").execute()
+        written += len(batch)
+    log(f"  wrote {written}")
+    log("Done.")
+
+
+if __name__ == "__main__":
+    main()
