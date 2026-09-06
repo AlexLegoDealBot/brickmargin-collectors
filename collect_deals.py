@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.5-forset"
+VERSION = "3.6-soldbasis"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -577,7 +577,15 @@ def evaluate(item, set_row):
         return None                       # unknown postage → not comparable
 
     total = round(price + ship, 2)
-    value = float(set_row["market_value"])
+    # A completed sale beats an asking price. When BrickLink has real
+    # transactions behind a set, that is the benchmark a listing is judged
+    # against — otherwise every "deal" is measured against a number sellers
+    # hoped for rather than one buyers paid, and margins come out inflated.
+    sold = set_row.get("sold_new")
+    if sold and (set_row.get("sold_new_qty") or 0) >= 3:
+        value = float(sold)
+    else:
+        value = float(set_row["market_value"])
 
     # A used set is not worth what a sealed one is. Discounting the
     # benchmark rather than the listing keeps the comparison honest.
@@ -701,7 +709,7 @@ def main():
     # Scan the sets worth scanning: priced, plausible, and expensive enough
     # that postage doesn't eat the whole margin.
     resp = (client.table("set_values")
-            .select("set_num,name,theme,market_value,comp_count,confidence,msrp")
+            .select("set_num,name,theme,market_value,comp_count,confidence,msrp,sold_new,sold_new_qty")
             .eq("plausible", True)
             .in_("confidence", ["high", "medium"])
             .gte("comp_count", MIN_COMPS)
