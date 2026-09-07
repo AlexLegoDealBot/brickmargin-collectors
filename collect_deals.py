@@ -42,7 +42,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.6-soldbasis"
+VERSION = "3.7-retailfirst"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -605,6 +605,18 @@ def evaluate(item, set_row):
         retail_deal = pct_off_msrp >= MIN_RETAIL_DISCOUNT
 
     market_deal = discount >= MIN_DISCOUNT
+
+    # A set still in production can be bought at retail. So for those, being
+    # under the SECONDARY price means nothing — the aftermarket for in-stock
+    # sets often sits above retail, which made a $105 listing of a $109 set
+    # show as "30% off" when it was 4% off. If you can walk into a shop and
+    # buy it, the only discount that counts is against the shop's price.
+    in_production = not set_row.get("retired_at")
+    if in_production and msrp:
+        market_deal = False
+        if not retail_deal:
+            return reject("in production and not under retail")
+
     if not (market_deal or retail_deal):
         return reject("above both retail and market price")
     if discount > MAX_DISCOUNT:

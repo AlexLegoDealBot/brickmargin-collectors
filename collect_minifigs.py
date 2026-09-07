@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.0"
+VERSION = "1.1-resumable"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -89,45 +89,67 @@ def rb_get(path, params=None):
     r.raise_for_status(); return r.json()
 
 def catalog(client):
-    """Pull every minifigure Rebrickable knows, with its BrickLink ID and sets."""
-    if not RB_KEY: sys.exit("ERROR: REBRICKABLE_KEY is required for MODE=catalog")
-    rows, page, url = [], 1, "/minifigs/"
-    params = {"page_size": 1000, "ordering": "-num_parts"}
-    while url:
-        data = rb_get(url if url.startswith("/") else "", params) if url.startswith("/") else requests.get(url, headers={"Authorization": f"key {RB_KEY}"}, timeout=30).json()
-        for m in data.get("results", []):
-            rows.append(m)
-        log(f"  page {page}: {len(rows)} figures so far")
-        url = data.get("next"); params = None; page += 1
-        if PROBE and page > 2: break
-    log(f"  {len(rows)} figures from Rebrickable — resolving BrickLink IDs")
+    """
+    Pull every minifigure Rebrickable knows, with its BrickLink ID and sets.
 
-    out, done = [], 0
-    for m in rows:
-        # each figure's detail carries external_ids.BrickLink
-        try:
-            d = rb_get(f"/minifigs/{m['set_num']}/")
-        except Exception:
-            continue
-        bl = ((d.get("external_ids") or {}).get("BrickLink") or [None])[0]
-        if not bl: continue
-        try:
-            sets = rb_get(f"/minifigs/{m['set_num']}/sets/", {"page_size": 50}).get("results", [])
-        except Exception:
-            sets = []
-        out.append({"fig_num": bl, "name": m["name"], "image_url": m.get("set_img_url"),
-                    "in_sets": [s["set_num"] for s in sets]})
-        done += 1
-        if done % 100 == 0: log(f"  {done} resolved")
-        time.sleep(0.6)   # Rebrickable: ~1 req/sec
-        if PROBE and done >= 25: break
-    log(f"  {len(out)} figures with BrickLink IDs")
-    if PROBE:
-        for r in out[:8]: log(f"    {r['fig_num']:>10}  {r['name'][:50]}  in {len(r['in_sets'])} sets")
-        log("  PROBE — nothing written"); return
-    for i in range(0, len(out), 200):
-        client.table("minifigs").upsert(out[i:i+200], on_conflict="fig_num").execute()
-    log(f"  wrote {len(out)}")
+    Resumable, because it has to be: Rebrickable allows about one request a
+    second and there are north of thirteen thousand figures, each needing two
+    calls. That's five hours, and a workflow run is capped at six. So this
+    writes every fifty figures rather than at the end, records each figure's
+    Rebrickable ID, and on the next run skips everything already stored. Run
+    it as many times as it takes; nothing is lost between runs.
+    """
+    if not RB_KEY: sys.exit("ERROR: REBRICKABLE_KEY is required for MODE=catalog")
+
+    have = set()
+    got = client.table("minifigs").select("rb_num").not_.is_("rb_num", "null").execute()
+    for r in (got.data or []): have.add(r["rb_num"])
+    log(f"  {len(have)} figures already stored — resuming")
+
+    written, skipped, batch = 0, 0, []
+    started = time.time()
+    url = RB + "/minifigs/?page_size=1000&ordering=-num_parts"
+    hdr = {"Authorization": f"key {RB_KEY}"}
+
+    def flush():
+        nonlocal batch, written
+        if not batch: return
+        if not PROBE:
+            client.table("minifigs").upsert(batch, on_conflict="fig_num").execute()
+        written += len(batch); batch = []
+
+    while url:
+        r = requests.get(url, headers=hdr, timeout=30)
+        if r.status_code == 429: time.sleep(5); continue
+        r.raise_for_status(); data = r.json()
+        for m in data.get("results", []):
+            if m["set_num"] in have: skipped += 1; continue
+            try:
+                d = rb_get(f"/minifigs/{m['set_num']}/")
+                bl = ((d.get("external_ids") or {}).get("BrickLink") or [None])[0]
+                if not bl:
+                    have.add(m["set_num"]); continue
+                sets = rb_get(f"/minifigs/{m['set_num']}/sets/", {"page_size": 50}).get("results", [])
+            except Exception as exc:
+                log(f"    {m['set_num']}: {str(exc)[:60]}"); continue
+            batch.append({"fig_num": bl, "rb_num": m["set_num"], "name": m["name"],
+                          "image_url": m.get("set_img_url"),
+                          "in_sets": [x["set_num"] for x in sets]})
+            have.add(m["set_num"])
+            if PROBE and len(batch) <= 10:
+                log(f"    {bl:>10}  {m['name'][:48]}  in {len(sets)} sets")
+            if len(batch) >= 50:
+                flush(); log(f"  {written} written · {skipped} skipped · {int(time.time()-started)}s")
+            time.sleep(0.55)
+            if PROBE and written + len(batch) >= 20:
+                log("  PROBE — stopping early, nothing written"); return
+            # leave the runner ten minutes short of its ceiling
+            if time.time() - started > 340 * 60:
+                flush(); log("  time limit approaching — stopping cleanly; run again to continue"); return
+        url = data.get("next")
+    flush()
+    log(f"  catalogue complete: {written} written this run, {skipped} already had")
+
 
 def prices(client):
     """Sold prices for the least-recently-checked figures."""
