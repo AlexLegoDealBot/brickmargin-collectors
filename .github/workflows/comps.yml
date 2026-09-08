@@ -57,3 +57,13 @@ jobs:
           MIN_LISTINGS: ${{ github.event.inputs.min_listings || '3' }}
           STRICT_SEALED: ${{ github.event.inputs.strict_sealed == 'true' && '1' || '' }}
         run: python collect_comps.py
+      - name: Tell search engines what changed
+        if: github.event.inputs.probe != 'true'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          INDEXNOW_SECRET: ${{ secrets.INDEXNOW_SECRET }}
+          SITE_URL: https://www.brickmargin.com
+          HOURS: '4'
+        run: python ping_indexnow.py
