@@ -48,7 +48,7 @@ import requests
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.4-polybag"
+VERSION = "2.5-listings"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -511,6 +511,40 @@ def main():
             continue
 
         row, kept, sample = summarize(items, set_num, s.get("name"), s.get("theme"))
+
+        # Keep what we counted. A median with its listings beside it is a
+        # number someone can check; a median alone is a number they have to
+        # trust. Up to twelve per set, replaced each time the set is priced.
+        if row and not PROBE:
+            keep_rows = []
+            for it in (items or [])[:60]:
+                title = it.get("title", "")
+                num = base_number(set_num) if 'base_number' in globals() else set_num.split('-')[0]
+                ok, _ = is_relevant(title, num, s.get("name"), s.get("theme"))
+                if not ok: continue
+                try: price = float(it["price"]["value"])
+                except Exception: continue
+                ship = None
+                so = (it.get("shippingOptions") or [{}])[0]
+                if so.get("shippingCost", {}).get("value") is not None:
+                    try: ship = float(so["shippingCost"]["value"])
+                    except Exception: ship = None
+                keep_rows.append({
+                    "item_id": str(it.get("itemId")), "set_num": set_num, "title": title[:200],
+                    "price": round(price, 2), "shipping": ship,
+                    "condition": (it.get("condition") or "")[:40],
+                    "seller": (it.get("seller") or {}).get("username"),
+                    "feedback_pct": float((it.get("seller") or {}).get("feedbackPercentage") or 0) or None,
+                    "image_url": (it.get("image") or {}).get("imageUrl"),
+                    "item_url": it.get("itemWebUrl", ""),
+                })
+                if len(keep_rows) >= 12: break
+            if keep_rows:
+                try:
+                    client.table("comp_listings").delete().eq("set_num", set_num).execute()
+                    client.table("comp_listings").upsert(keep_rows, on_conflict="item_id").execute()
+                except Exception as exc:
+                    log(f"      listings not saved: {str(exc)[:80]}")
         attempted.append(set_num)
 
         if PROBE:
