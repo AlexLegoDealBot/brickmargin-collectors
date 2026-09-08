@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "2.0-bulk"
+VERSION = "2.1-popular"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -147,6 +147,7 @@ def catalog(client):
         "name": f["name"],
         "image_url": f.get("img_url") or None,
         "in_sets": sorted(in_sets.get(f["fig_num"], []))[:60],
+        "set_count": len(in_sets.get(f["fig_num"], [])),
     } for f in figs if f.get("name")]
 
     if PROBE:
@@ -170,8 +171,9 @@ def prices(client):
         if not v: sys.exit(f"ERROR: {n} is required for MODE=prices")
     # Price the figures most likely to be looked up: the ones in the most
     # sets first, since those are the ones people actually own.
-    figs = (client.table("minifigs").select("fig_num,rb_num,bl_num,name,in_sets")
-            .is_("checked_at", "null").limit(BATCH).execute()).data or []
+    figs = (client.table("minifigs").select("fig_num,rb_num,bl_num,name,set_count")
+            .is_("checked_at", "null")
+            .order("set_count", desc=True).limit(BATCH).execute()).data or []
     log(f"  {len(figs)} figures queued")
     priced, missing, updates = 0, 0, []
     for i, f in enumerate(figs, 1):
@@ -187,6 +189,8 @@ def prices(client):
             except Exception as exc:
                 log(f"    {f['fig_num']}: {str(exc)[:60]}"); continue
             if not bl:
+                if missing < 5:
+                    log(f"    {f['fig_num']} \"{f['name'][:40]}\" — no BrickLink id on Rebrickable")
                 updates.append((f["fig_num"], {"checked_at": now(), "bl_num": "none"}))
                 missing += 1
                 continue
