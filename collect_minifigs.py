@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "2.1-popular"
+VERSION = "3.0-bricklink"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -101,68 +101,79 @@ def rb_get(path, params=None, attempt=0):
 
 def catalog(client):
     """
-    Build the figure catalogue from Rebrickable's bulk files.
+    Build the figure catalogue from BrickLink, one set at a time.
 
-    The API route needed two calls per figure — 26,000 calls at one per
-    second, seven hours, and a rate limit to trip over. Rebrickable publishes
-    the same data as gzipped CSVs, so this is three downloads and a join:
+    Rebrickable turned out to have no BrickLink IDs for minifigures — only
+    for parts and sets — so the previous approach was matching against a
+    field that doesn't exist, and every figure came back "not on BrickLink".
 
-      minifigs.csv          every figure: number, name, image
-      inventory_minifigs    which inventories contain which figure
-      inventories.csv       which set each inventory belongs to
+    BrickLink's own set inventories fix this at the root: /items/SET/{no}/
+    subsets lists every minifigure in a set WITH its BrickLink ID. Walk our
+    set catalogue, collect the figures, and the mapping problem disappears
+    because there is no mapping — the IDs are BrickLink's from the start.
+    Images come from BrickLink's predictable URL pattern, so no extra call.
 
-    That gives us the figure list and the sets each appears in. The one thing
-    the CSVs lack is BrickLink's ID, so figures are keyed by Rebrickable's
-    fig-XXXXXX and the price step resolves BrickLink IDs lazily, only for the
-    figures it's about to price. Minutes instead of hours, and nothing to
-    babysit.
+    One call per set, ~6,800 sets, 5,000 calls a day: two or three runs.
+    Resumable — each set is marked when done.
     """
-    import csv, gzip, io, collections
+    todo = (client.table("sets").select("set_num,name,theme,year_released")
+            .is_("minifigs_checked_at", "null")
+            .order("year_released", desc=True).limit(BATCH).execute()).data or []
+    log(f"  {len(todo)} sets to inventory this run")
+    figs, done, empty = {}, [], 0
 
-    def grab(name):
-        url = f"https://cdn.rebrickable.com/media/downloads/{name}.csv.gz"
-        log(f"  downloading {name}.csv.gz")
-        r = requests.get(url, timeout=180)
-        r.raise_for_status()
-        text = gzip.decompress(r.content).decode("utf-8", "replace")
-        return list(csv.DictReader(io.StringIO(text)))
+    for i, st in enumerate(todo, 1):
+        no = st["set_num"] if "-" in st["set_num"] else st["set_num"] + "-1"
+        d = bl_get(f"/items/SET/{no}/subsets", {"break_minifigs": "false"})
+        if d == "RATE_LIMIT":
+            log("  rate limited — stopping cleanly; run again to continue"); break
+        done.append(st["set_num"])
+        if d in (None, "MISSING"):
+            empty += 1; continue
+        found = 0
+        for entry in d or []:
+            for e in entry.get("entries", []):
+                it = e.get("item") or {}
+                if it.get("type") != "MINIFIG": continue
+                fig = it["no"]; found += 1
+                row = figs.setdefault(fig, {
+                    "fig_num": fig, "bl_num": fig, "name": it.get("name", fig),
+                    "theme": st.get("theme"), "year_released": st.get("year_released"),
+                    "image_url": f"https://img.bricklink.com/ItemImage/MN/0/{fig}.png",
+                    "in_sets": set(),
+                })
+                row["in_sets"].add(st["set_num"])
+                # earliest appearance wins for year
+                if st.get("year_released") and (row["year_released"] or 9999) > st["year_released"]:
+                    row["year_released"] = st["year_released"]
+        if i % 50 == 0:
+            log(f"  {i}/{len(todo)} sets · {len(figs)} figures so far")
+        if PROBE and i >= 15: break
+        time.sleep(0.25)
 
-    figs = grab("minifigs")
-    log(f"  {len(figs):,} figures in the catalogue")
-    inv_figs = grab("inventory_minifigs")
-    inventories = grab("inventories")
-
-    # inventory id -> set number, then figure -> the sets it appears in
-    inv_set = {i["id"]: i["set_num"] for i in inventories}
-    in_sets = collections.defaultdict(set)
-    for r in inv_figs:
-        s_num = inv_set.get(r["inventory_id"])
-        if s_num:
-            in_sets[r["fig_num"]].add(s_num)
-    log(f"  mapped {len(in_sets):,} figures to their sets")
-
-    rows = [{
-        "fig_num": f["fig_num"],            # keyed on Rebrickable id for now
-        "rb_num": f["fig_num"],
-        "name": f["name"],
-        "image_url": f.get("img_url") or None,
-        "in_sets": sorted(in_sets.get(f["fig_num"], []))[:60],
-        "set_count": len(in_sets.get(f["fig_num"], [])),
-    } for f in figs if f.get("name")]
+    rows = []
+    for r in figs.values():
+        r["in_sets"] = sorted(r["in_sets"]); r["set_count"] = len(r["in_sets"]); rows.append(r)
+    log(f"  {len(rows)} figures from {len(done)} sets ({empty} had no inventory on BrickLink)")
 
     if PROBE:
-        for r in rows[:10]:
-            log(f"    {r['fig_num']:>14}  {r['name'][:48]:<50} in {len(r['in_sets'])} sets")
-        log(f"  PROBE — {len(rows):,} figures ready, nothing written")
-        return
+        for r in rows[:10]: log(f"    {r['fig_num']:>10}  {r['name'][:46]:<48} in {r['set_count']} sets")
+        log("  PROBE — nothing written"); return
 
-    written = 0
-    for i in range(0, len(rows), 500):
-        client.table("minifigs").upsert(rows[i:i + 500], on_conflict="fig_num").execute()
-        written += len(rows[i:i + 500])
-        if written % 5000 == 0:
-            log(f"  wrote {written:,}")
-    log(f"  catalogue complete: {written:,} figures")
+    # merge in_sets with what's already stored, so a figure seen across runs
+    # keeps every set rather than only the latest batch's
+    if rows:
+        have = (client.table("minifigs").select("fig_num,in_sets")
+                .in_("fig_num", [r["fig_num"] for r in rows]).execute()).data or []
+        prev = {h["fig_num"]: set(h.get("in_sets") or []) for h in have}
+        for r in rows:
+            r["in_sets"] = sorted(set(r["in_sets"]) | prev.get(r["fig_num"], set()))
+            r["set_count"] = len(r["in_sets"])
+        for i in range(0, len(rows), 300):
+            client.table("minifigs").upsert(rows[i:i+300], on_conflict="fig_num").execute()
+    for i in range(0, len(done), 300):
+        client.table("sets").update({"minifigs_checked_at": now()}).in_("set_num", done[i:i+300]).execute()
+    log(f"  wrote {len(rows)} figures · marked {len(done)} sets")
 
 
 def prices(client):
@@ -171,35 +182,13 @@ def prices(client):
         if not v: sys.exit(f"ERROR: {n} is required for MODE=prices")
     # Price the figures most likely to be looked up: the ones in the most
     # sets first, since those are the ones people actually own.
-    figs = (client.table("minifigs").select("fig_num,rb_num,bl_num,name,set_count")
+    figs = (client.table("minifigs").select("fig_num,bl_num,name,set_count")
             .is_("checked_at", "null")
             .order("set_count", desc=True).limit(BATCH).execute()).data or []
     log(f"  {len(figs)} figures queued")
     priced, missing, updates = 0, 0, []
     for i, f in enumerate(figs, 1):
-        # BrickLink prices by its own id (sw0001), Rebrickable by fig-000123.
-        # Resolve once, remember it, and skip the lookup ever after.
-        bl = f.get("bl_num")
-        if not bl:
-            if not RB_KEY:
-                log("  REBRICKABLE_KEY needed once to resolve BrickLink ids"); break
-            try:
-                d = rb_get(f"/minifigs/{f['rb_num'] or f['fig_num']}/")
-                bl = ((d.get("external_ids") or {}).get("BrickLink") or [None])[0]
-            except Exception as exc:
-                log(f"    {f['fig_num']}: {str(exc)[:60]}"); continue
-            if not bl:
-                if missing < 5:
-                    log(f"    {f['fig_num']} \"{f['name'][:40]}\" — no BrickLink id on Rebrickable")
-                updates.append((f["fig_num"], {"checked_at": now(), "bl_num": "none"}))
-                missing += 1
-                continue
-            updates.append((f["fig_num"], {"bl_num": bl}))
-        if bl == "none":
-            missing += 1
-            updates.append((f["fig_num"], {"checked_at": now()}))
-            continue
-
+        bl = f.get("bl_num") or f["fig_num"]
         new = price(bl, "N")
         if new == "RATE_LIMIT": log("  rate limited — stopping"); break
         row = {"checked_at": now()}

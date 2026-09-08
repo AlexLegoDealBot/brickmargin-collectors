@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'catalog (build the list from Rebrickable, run once) or prices (BrickLink sold prices)'
+        description: 'catalog (walk our sets on BrickLink, run until it reports 0 sets left) or prices'
         default: 'prices'
       probe:
         type: boolean
         default: true
       batch_size:
-        default: '350'
+        default: '1200'
   schedule:
     - cron: '10 5,17 * * *'
 
@@ -33,5 +33,5 @@ jobs:
           BRICKLINK_TOKEN_SECRET: ${{ secrets.BRICKLINK_TOKEN_SECRET }}
           MODE: ${{ github.event.inputs.mode || 'prices' }}
           PROBE: ${{ github.event.inputs.probe || 'false' }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size || '350' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '1200' }}
         run: python collect_minifigs.py
