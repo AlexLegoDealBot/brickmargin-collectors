@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.2-heartbeat"
+VERSION = "2.0-bulk"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -101,85 +101,109 @@ def rb_get(path, params=None, attempt=0):
 
 def catalog(client):
     """
-    Pull every minifigure Rebrickable knows, with its BrickLink ID and sets.
+    Build the figure catalogue from Rebrickable's bulk files.
 
-    Resumable, because it has to be: Rebrickable allows about one request a
-    second and there are north of thirteen thousand figures, each needing two
-    calls. That's five hours, and a workflow run is capped at six. So this
-    writes every fifty figures rather than at the end, records each figure's
-    Rebrickable ID, and on the next run skips everything already stored. Run
-    it as many times as it takes; nothing is lost between runs.
+    The API route needed two calls per figure — 26,000 calls at one per
+    second, seven hours, and a rate limit to trip over. Rebrickable publishes
+    the same data as gzipped CSVs, so this is three downloads and a join:
+
+      minifigs.csv          every figure: number, name, image
+      inventory_minifigs    which inventories contain which figure
+      inventories.csv       which set each inventory belongs to
+
+    That gives us the figure list and the sets each appears in. The one thing
+    the CSVs lack is BrickLink's ID, so figures are keyed by Rebrickable's
+    fig-XXXXXX and the price step resolves BrickLink IDs lazily, only for the
+    figures it's about to price. Minutes instead of hours, and nothing to
+    babysit.
     """
-    if not RB_KEY: sys.exit("ERROR: REBRICKABLE_KEY is required for MODE=catalog")
+    import csv, gzip, io, collections
 
-    have = set()
-    got = client.table("minifigs").select("rb_num").not_.is_("rb_num", "null").execute()
-    for r in (got.data or []): have.add(r["rb_num"])
-    log(f"  {len(have)} figures already stored — resuming")
+    def grab(name):
+        url = f"https://cdn.rebrickable.com/media/downloads/{name}.csv.gz"
+        log(f"  downloading {name}.csv.gz")
+        r = requests.get(url, timeout=180)
+        r.raise_for_status()
+        text = gzip.decompress(r.content).decode("utf-8", "replace")
+        return list(csv.DictReader(io.StringIO(text)))
 
-    written, skipped, batch = 0, 0, []
-    started = time.time()
-    url = RB + "/minifigs/?page_size=1000&ordering=-num_parts"
-    hdr = {"Authorization": f"key {RB_KEY}"}
+    figs = grab("minifigs")
+    log(f"  {len(figs):,} figures in the catalogue")
+    inv_figs = grab("inventory_minifigs")
+    inventories = grab("inventories")
 
-    def flush():
-        nonlocal batch, written
-        if not batch: return
-        if not PROBE:
-            client.table("minifigs").upsert(batch, on_conflict="fig_num").execute()
-        written += len(batch); batch = []
+    # inventory id -> set number, then figure -> the sets it appears in
+    inv_set = {i["id"]: i["set_num"] for i in inventories}
+    in_sets = collections.defaultdict(set)
+    for r in inv_figs:
+        s_num = inv_set.get(r["inventory_id"])
+        if s_num:
+            in_sets[r["fig_num"]].add(s_num)
+    log(f"  mapped {len(in_sets):,} figures to their sets")
 
-    while url:
-        rel = url[len(RB):] if url.startswith(RB) else url
-        data = rb_get(rel) if rel.startswith("/") else requests.get(url, headers=hdr, timeout=30).json()
-        log(f"  list page fetched: {len(data.get('results', []))} figures on it")
-        for m in data.get("results", []):
-            if m["set_num"] in have: skipped += 1; continue
-            try:
-                d = rb_get(f"/minifigs/{m['set_num']}/")
-                bl = ((d.get("external_ids") or {}).get("BrickLink") or [None])[0]
-                if not bl:
-                    have.add(m["set_num"]); continue
-                sets = rb_get(f"/minifigs/{m['set_num']}/sets/", {"page_size": 50}).get("results", [])
-            except Exception as exc:
-                log(f"    {m['set_num']}: {str(exc)[:60]}"); continue
-            batch.append({"fig_num": bl, "rb_num": m["set_num"], "name": m["name"],
-                          "image_url": m.get("set_img_url"),
-                          "in_sets": [x["set_num"] for x in sets]})
-            have.add(m["set_num"])
-            if (written + len(batch)) % 10 == 0:
-                log(f"  {written + len(batch)} figures so far · {skipped} skipped · {int(time.time()-started)}s")
-            if PROBE and len(batch) <= 10:
-                log(f"    {bl:>10}  {m['name'][:48]}  in {len(sets)} sets")
-            if len(batch) >= 50:
-                flush(); log(f"  {written} written · {skipped} skipped · {int(time.time()-started)}s")
-            if PROBE and written + len(batch) >= 20:
-                log("  PROBE — stopping early, nothing written"); return
-            # leave the runner ten minutes short of its ceiling
-            if time.time() - started > 340 * 60:
-                flush(); log("  time limit approaching — stopping cleanly; run again to continue"); return
-        url = data.get("next")
-    flush()
-    log(f"  catalogue complete: {written} written this run, {skipped} already had")
+    rows = [{
+        "fig_num": f["fig_num"],            # keyed on Rebrickable id for now
+        "rb_num": f["fig_num"],
+        "name": f["name"],
+        "image_url": f.get("img_url") or None,
+        "in_sets": sorted(in_sets.get(f["fig_num"], []))[:60],
+    } for f in figs if f.get("name")]
+
+    if PROBE:
+        for r in rows[:10]:
+            log(f"    {r['fig_num']:>14}  {r['name'][:48]:<50} in {len(r['in_sets'])} sets")
+        log(f"  PROBE — {len(rows):,} figures ready, nothing written")
+        return
+
+    written = 0
+    for i in range(0, len(rows), 500):
+        client.table("minifigs").upsert(rows[i:i + 500], on_conflict="fig_num").execute()
+        written += len(rows[i:i + 500])
+        if written % 5000 == 0:
+            log(f"  wrote {written:,}")
+    log(f"  catalogue complete: {written:,} figures")
 
 
 def prices(client):
     """Sold prices for the least-recently-checked figures."""
     for n, v in (("BRICKLINK_CONSUMER_KEY", CK), ("BRICKLINK_TOKEN", TK)):
         if not v: sys.exit(f"ERROR: {n} is required for MODE=prices")
-    figs = (client.table("minifigs").select("fig_num,name")
-            .order("checked_at", desc=False, nullsfirst=True).limit(BATCH).execute()).data or []
+    # Price the figures most likely to be looked up: the ones in the most
+    # sets first, since those are the ones people actually own.
+    figs = (client.table("minifigs").select("fig_num,rb_num,bl_num,name,in_sets")
+            .is_("checked_at", "null").limit(BATCH).execute()).data or []
     log(f"  {len(figs)} figures queued")
     priced, missing, updates = 0, 0, []
     for i, f in enumerate(figs, 1):
-        new = price(f["fig_num"], "N")
+        # BrickLink prices by its own id (sw0001), Rebrickable by fig-000123.
+        # Resolve once, remember it, and skip the lookup ever after.
+        bl = f.get("bl_num")
+        if not bl:
+            if not RB_KEY:
+                log("  REBRICKABLE_KEY needed once to resolve BrickLink ids"); break
+            try:
+                d = rb_get(f"/minifigs/{f['rb_num'] or f['fig_num']}/")
+                bl = ((d.get("external_ids") or {}).get("BrickLink") or [None])[0]
+            except Exception as exc:
+                log(f"    {f['fig_num']}: {str(exc)[:60]}"); continue
+            if not bl:
+                updates.append((f["fig_num"], {"checked_at": now(), "bl_num": "none"}))
+                missing += 1
+                continue
+            updates.append((f["fig_num"], {"bl_num": bl}))
+        if bl == "none":
+            missing += 1
+            updates.append((f["fig_num"], {"checked_at": now()}))
+            continue
+
+        new = price(bl, "N")
         if new == "RATE_LIMIT": log("  rate limited — stopping"); break
         row = {"checked_at": now()}
         if new == "MISSING":
             missing += 1
         else:
             time.sleep(0.3)
-            used = price(f["fig_num"], "U")
+            used = price(bl, "U")
             if used == "RATE_LIMIT": break
             if new:
                 row.update({"sold_new": round(new["avg"], 2), "sold_new_qty": new["qty"],
