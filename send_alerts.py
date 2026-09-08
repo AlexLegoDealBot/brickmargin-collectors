@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.2-dates"
+VERSION = "1.3-perset"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -264,12 +264,19 @@ def main():
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=COOLDOWN_HOURS)).isoformat()
     recent = set()
     for a in (client.table("alerts_sent")
-              .select("user_id,set_num,kind")
+              .select("user_id,set_num,notify_email,target_drop_pct,target_price,kind")
               .gte("sent_at", cutoff).execute()).data or []:
         recent.add((a["user_id"], a["set_num"], a["kind"]))
 
     by_user = {}
     for w in watches:
+        # Per-set and per-person switches. A watch with email off, or a
+        # person who turned everything off, never generates an email.
+        if w.get("notify_email") is False:
+            continue
+        prof = profiles.get(w["user_id"]) or {}
+        if prof.get("notify_all") is False:
+            continue
         by_user.setdefault(w["user_id"], []).append(w["set_num"])
 
     sent_rows, emails = [], 0
@@ -280,7 +287,7 @@ def main():
         if not email or not prof.get("alert_email", True):
             continue
 
-        threshold = float(prof.get("alert_drop_pct") or 5)
+        threshold = float(w.get("target_drop_pct") or prof.get("alert_drop_pct") or 5)
         items = []
 
         for set_num in nums:
