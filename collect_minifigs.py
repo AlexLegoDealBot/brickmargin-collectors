@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.1-resumable"
+VERSION = "1.2-heartbeat"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -83,9 +83,20 @@ def price(fig, cond):
 
 # --------------------------------------------------------------- Rebrickable
 RB = "https://rebrickable.com/api/v3/lego"
-def rb_get(path, params=None):
+RB_LAST = [0.0]
+def rb_get(path, params=None, attempt=0):
+    """One Rebrickable call, held to their rate limit, with visible backoff."""
+    # never more than one call per 1.1s, whatever the caller does
+    wait = 1.1 - (time.time() - RB_LAST[0])
+    if wait > 0: time.sleep(wait)
+    RB_LAST[0] = time.time()
     r = requests.get(RB + path, params=params or {}, headers={"Authorization": f"key {RB_KEY}"}, timeout=30)
-    if r.status_code == 429: time.sleep(5); return rb_get(path, params)
+    if r.status_code == 429:
+        pause = min(60, 5 * (2 ** attempt))
+        log(f"    Rebrickable throttled us — waiting {pause}s (attempt {attempt + 1})")
+        time.sleep(pause)
+        if attempt >= 6: raise RuntimeError("Rebrickable keeps throttling; stopping this run")
+        return rb_get(path, params, attempt + 1)
     r.raise_for_status(); return r.json()
 
 def catalog(client):
@@ -119,9 +130,9 @@ def catalog(client):
         written += len(batch); batch = []
 
     while url:
-        r = requests.get(url, headers=hdr, timeout=30)
-        if r.status_code == 429: time.sleep(5); continue
-        r.raise_for_status(); data = r.json()
+        rel = url[len(RB):] if url.startswith(RB) else url
+        data = rb_get(rel) if rel.startswith("/") else requests.get(url, headers=hdr, timeout=30).json()
+        log(f"  list page fetched: {len(data.get('results', []))} figures on it")
         for m in data.get("results", []):
             if m["set_num"] in have: skipped += 1; continue
             try:
@@ -136,11 +147,12 @@ def catalog(client):
                           "image_url": m.get("set_img_url"),
                           "in_sets": [x["set_num"] for x in sets]})
             have.add(m["set_num"])
+            if (written + len(batch)) % 10 == 0:
+                log(f"  {written + len(batch)} figures so far · {skipped} skipped · {int(time.time()-started)}s")
             if PROBE and len(batch) <= 10:
                 log(f"    {bl:>10}  {m['name'][:48]}  in {len(sets)} sets")
             if len(batch) >= 50:
                 flush(); log(f"  {written} written · {skipped} skipped · {int(time.time()-started)}s")
-            time.sleep(0.55)
             if PROBE and written + len(batch) >= 20:
                 log("  PROBE — stopping early, nothing written"); return
             # leave the runner ten minutes short of its ceiling
