@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.3-perset"
+VERSION = "1.4-perset-fix"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -213,7 +213,7 @@ def main():
     log("  preflight ok — all tables and columns present")
 
     watches = (client.table("watches")
-               .select("user_id,set_num")
+               .select("user_id,set_num,notify_email,target_drop_pct,target_price")
                .eq("active", True)
                .not_.is_("set_num", "null")
                .execute()).data or []
@@ -226,7 +226,7 @@ def main():
     log(f"  {len(watches)} watches · {len(user_ids)} people · {len(set_nums)} sets")
 
     profiles = {p["id"]: p for p in (client.table("profiles")
-                .select("id,email,alert_email,alert_price,alert_discount,alert_drop_pct")
+                .select("id,email,alert_email,alert_price,alert_discount,alert_drop_pct,notify_all")
                 .in_("id", user_ids).execute()).data or []}
 
     values = {v["set_num"]: v for v in (client.table("set_values")
@@ -264,7 +264,7 @@ def main():
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=COOLDOWN_HOURS)).isoformat()
     recent = set()
     for a in (client.table("alerts_sent")
-              .select("user_id,set_num,notify_email,target_drop_pct,target_price,kind")
+              .select("user_id,set_num,kind")
               .gte("sent_at", cutoff).execute()).data or []:
         recent.add((a["user_id"], a["set_num"], a["kind"]))
 
@@ -288,6 +288,7 @@ def main():
             continue
 
         threshold = float(w.get("target_drop_pct") or prof.get("alert_drop_pct") or 5)
+        w_by_set = {x["set_num"]: x for x in watches if x["user_id"] == uid}
         items = []
 
         for set_num in nums:
@@ -295,6 +296,20 @@ def main():
             if not val:
                 continue
             name = val.get("name") or set_num
+
+            # --- reached a target price ("tell me when it hits $400") ---
+            tp = w_by_set.get(set_num, {}).get("target_price")
+            cur = float(val.get("market_value") or 0)
+            if tp is not None and cur and cur <= float(tp):
+                key = (uid, set_num, "target_price")
+                if key not in recent:
+                    items.append({
+                        "set_num": set_num, "name": name,
+                        "detail": f"Now {usd(cur)} · your target was {usd(float(tp))}",
+                        "figure": "Target hit", "colour": "#0b6b3a",
+                    })
+                    sent_rows.append({"user_id": uid, "set_num": set_num, "kind": "target_price",
+                                      "detail": f"{usd(cur)} reached target {usd(float(tp))}"})
 
             # --- price move ---
             if prof.get("alert_price", True):
