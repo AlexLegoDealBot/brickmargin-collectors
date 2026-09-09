@@ -1,0 +1,21 @@
+name: Weekly Digest
+on:
+  workflow_dispatch:
+    inputs:
+      probe: { type: boolean, default: true }
+  schedule:
+    - cron: '0 14 * * 0'   # Sundays, 9am Central
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+        run: python send_digest.py
