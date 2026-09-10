@@ -59,3 +59,14 @@ jobs:
           EXCLUDE_RETIRED: ${{ github.event.inputs.exclude_retired || 'true' }}
           MAX_SETS: ${{ github.event.inputs.max_sets || '1200' }}
         run: python collect_deals.py
+      - name: Post new deals to Discord
+        if: github.event.inputs.probe != 'true'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          PROBE: 'false'
+          MIN_SCORE: '5.0'
+          MAX_POSTS: '8'
+        run: python post_discord.py
