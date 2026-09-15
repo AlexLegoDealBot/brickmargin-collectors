@@ -25,6 +25,31 @@ PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 SITE = "https://www.brickmargin.com"
 if not (SB and KEY): sys.exit("ERROR: SUPABASE_URL and SUPABASE_SERVICE_KEY required")
 if not HOOK and not PROBE: sys.exit("ERROR: DISCORD_WEBHOOK required unless probing")
+CAMPAIGN = os.environ.get("EBAY_CAMPAIGN_ID", "5339178457").strip()
+
+def affiliate(url: str) -> str:
+    """
+    Every link out earns, wherever it is posted.
+
+    The Discord feed was sending raw eBay URLs — the same listings that earn
+    a commission on the site were earning nothing in the channel. These are
+    the exact parameters the site uses, mkevt=1 included: without it eBay
+    records no click however correct the campaign looks.
+    """
+    if not url or not CAMPAIGN:
+        return url
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        u = urlparse(url)
+        q = dict(parse_qsl(u.query))
+        q.update({"mkevt": "1", "mkcid": "1", "mkrid": "711-53200-19255-0",
+                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001",
+                  "customid": "discord"})
+        return urlunparse(u._replace(query=urlencode(q)))
+    except Exception:
+        return url
+
+
 def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${round(float(n)):,}"
 
@@ -42,7 +67,7 @@ for d in fresh:
            else f"{round(d['discount_pct'])}% under market")
     embed = {
         "title": f"{d['set_name']} — {usd(d['total_price'])}",
-        "url": d["item_url"],
+        "url": affiliate(d["item_url"]),
         "description": f"**{off}**" + (f" · retail {usd(d['msrp'])}" if d.get("msrp") else "")
                        + (f" · resells {usd(d['market_value'])}" if d.get("market_value") else ""),
         "color": 0xE3000B,
@@ -60,7 +85,8 @@ for d in fresh:
     embed = {k: v for k, v in embed.items() if v is not None}
     if PROBE:
         log(f"  would post: {d['set_name']} {usd(d['total_price'])} ({off})"); sent += 1; continue
-    r = requests.post(HOOK, json={"embeds": [embed]}, timeout=20)
+    r = requests.post(HOOK, json={"embeds": [embed], "username": "BrickMargin",
+                                  "avatar_url": "https://www.brickmargin.com/logo-b-512.png"}, timeout=20)
     if r.status_code < 300:
         client.table("discord_posts").insert({"item_id": d["item_id"], "set_num": d["set_num"]}).execute()
         sent += 1; time.sleep(1.2)          # Discord rate limits webhooks
