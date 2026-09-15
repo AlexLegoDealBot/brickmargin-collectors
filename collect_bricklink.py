@@ -43,9 +43,31 @@ import urllib.parse
 from datetime import datetime, timezone
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ---------------------------------------------------------------------------
+# One session, with retries.
+#
+# A single TCP reset from eBay killed a whole run and threw away 129 comps
+# already gathered — the network is not reliable and a collector that assumes
+# it is will keep dying halfway. This retries connection errors and 5xx
+# responses five times with a widening backoff, and reuses connections, which
+# also makes every run a little faster.
+# ---------------------------------------------------------------------------
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(
+    max_retries=Retry(
+        total=5, connect=5, read=5, backoff_factor=1.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    ),
+    pool_connections=10, pool_maxsize=20,
+))
 from supabase import create_client
 
-VERSION = "1.5-images"
+VERSION = "1.6-resilient"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -131,7 +153,7 @@ def call(path, params=None, verbose=False, missing_is_404=False):
     params = params or {}
     url = f"{API}{path}"
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             url, params=params,
             headers={"Authorization": sign("GET", url, params)},
             timeout=30,

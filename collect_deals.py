@@ -39,10 +39,32 @@ import time
 from datetime import datetime, timezone
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ---------------------------------------------------------------------------
+# One session, with retries.
+#
+# A single TCP reset from eBay killed a whole run and threw away 129 comps
+# already gathered — the network is not reliable and a collector that assumes
+# it is will keep dying halfway. This retries connection errors and 5xx
+# responses five times with a widening backoff, and reuses connections, which
+# also makes every run a little faster.
+# ---------------------------------------------------------------------------
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(
+    max_retries=Retry(
+        total=5, connect=5, read=5, backoff_factor=1.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    ),
+    pool_connections=10, pool_maxsize=20,
+))
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "3.7-retailfirst"
+VERSION = "4.1-resilient"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -141,6 +163,9 @@ SOURCE = "ebay"
 US_ONLY = os.environ.get("US_ONLY", "true").strip().lower() != "false"
 MIN_MARGIN = num_env("MIN_MARGIN", 15)
 MAX_SETS = int(num_env("MAX_SETS", 1200))
+# One extra call per listing that survives every title filter — a few dozen a
+# run. Two bad deals a week costs more trust than the quota ever will.
+CHECK_DESCRIPTIONS = os.environ.get("CHECK_DESCRIPTIONS", "true").strip().lower() != "false"
 MIN_VALUE = num_env("MIN_VALUE", 40)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 
@@ -151,7 +176,7 @@ def log(msg):
 
 def get_token():
     creds = base64.b64encode(f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()).decode()
-    resp = requests.post(
+    resp = HTTP.post(
         EBAY_OAUTH_URL,
         headers={"Authorization": f"Basic {creds}",
                  "Content-Type": "application/x-www-form-urlencoded"},
@@ -423,6 +448,57 @@ def sold_for_another_set(title, num):
     return bool(re.search(r"\bfor\b[\w\s:&'/-]{0,40}$", before))
 
 
+# ---------------------------------------------------------------------------
+# Reading the listing, not just its title.
+#
+# Two got through that no title filter could catch: bags from a 10302 sold
+# without the box, and a 75454 that turns out to be the escape pod and a
+# figure rather than the set. Both said so in the description and nowhere
+# else. eBay's item endpoint returns that text, so every listing that has
+# survived the title filters is now read before it reaches the board.
+#
+# One extra call per surviving listing, and only survivors — a few dozen a
+# run, not thousands.
+# ---------------------------------------------------------------------------
+DESC_RED_FLAGS = (
+    r"\bno\s+box\b", r"\bwithout\s+(the\s+)?box\b", r"\bbox\s+not\s+included\b",
+    r"\bbags?\s+only\b", r"\bjust\s+the\s+bags?\b", r"\bsealed\s+bags?\s+only\b",
+    r"\bno\s+(instructions?|manual)\b",
+    r"\b(instructions?|manual|box|minifigs?|minifigures?|stickers?)\s+(are\s+|is\s+)?not\s+included\b",
+    r"\bdoes\s*n[o']?t\s+(come|include)\b[^.]{0,40}\b(box|set|full|complete|minifig)",
+    r"\bonly\s+(comes\s+with|includes)\b", r"\bpartial\s+set\b", r"\bincomplete\b",
+    r"\bmissing\b", r"\bno\s+minifig", r"\bwithout\s+minifig",
+    r"\bpolybag\s+only\b", r"\bnot\s+the\s+(full|complete|whole)\s+set\b",
+    r"\bone\s+(bag|sealed\s+bag)\b", r"\bbag\s+\d\s+only\b",
+)
+
+def description_rejects(item_id, token):
+    """None if the listing reads clean, or the phrase that disqualifies it."""
+    try:
+        r = HTTP.get(
+            f"https://api.ebay.com/buy/browse/v1/item/{item_id}",
+            headers={"Authorization": f"Bearer {token}",
+                     "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
+            timeout=20)
+        if r.status_code != 200:
+            return None                      # never reject on a failed lookup
+        d = r.json()
+    except Exception:
+        return None
+    text = " ".join(filter(None, [
+        d.get("description", ""), d.get("shortDescription", ""),
+        " ".join(f"{a.get('name','')} {a.get('value','')}"
+                 for a in (d.get("localizedAspects") or [])),
+    ]))
+    text = re.sub(r"<[^>]+>", " ", text).lower()
+    text = re.sub(r"\s+", " ", text)[:6000]
+    for pat in DESC_RED_FLAGS:
+        m = re.search(pat, text)
+        if m:
+            return m.group(0).strip()
+    return None
+
+
 def looks_partial(title):
     """Catches the phrasings a plain word list misses."""
     t = (title or "").lower()
@@ -475,7 +551,7 @@ def search(token, set_num, condition_filter="NEW|USED"):
     The old code made a NEW request and a USED request per set — double the
     calls against a daily budget, for data eBay is happy to return together.
     """
-    resp = requests.get(
+    resp = HTTP.get(
         EBAY_SEARCH_URL,
         headers={"Authorization": f"Bearer {token}",
                  "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE,
@@ -765,8 +841,18 @@ def main():
         out = []
         for item in (items or []):
             deal = evaluate(item, set_row)
-            if deal:
-                out.append(deal)
+            if not deal:
+                continue
+            # Last gate, and the only one that reads the listing rather than
+            # its title: a 10302 sold as loose bags and a 75454 that is really
+            # just the escape pod both said so here and nowhere else.
+            if CHECK_DESCRIPTIONS:
+                raw = str(item.get("itemId", ""))
+                flag = description_rejects(raw, token)
+                if flag:
+                    reject(f"description says \"{flag}\"")
+                    continue
+            out.append(deal)
         time.sleep(PAUSE)
         return out
 

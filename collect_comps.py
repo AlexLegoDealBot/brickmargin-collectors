@@ -45,10 +45,32 @@ import time
 from datetime import datetime, timezone
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ---------------------------------------------------------------------------
+# One session, with retries.
+#
+# A single TCP reset from eBay killed a whole run and threw away 129 comps
+# already gathered — the network is not reliable and a collector that assumes
+# it is will keep dying halfway. This retries connection errors and 5xx
+# responses five times with a widening backoff, and reuses connections, which
+# also makes every run a little faster.
+# ---------------------------------------------------------------------------
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(
+    max_retries=Retry(
+        total=5, connect=5, read=5, backoff_factor=1.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    ),
+    pool_connections=10, pool_maxsize=20,
+))
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.5-listings"
+VERSION = "2.6-resilient"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -169,7 +191,7 @@ def get_token():
     creds = base64.b64encode(
         f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()).decode()
 
-    resp = requests.post(
+    resp = HTTP.post(
         EBAY_OAUTH_URL,
         headers={"Authorization": f"Basic {creds}",
                  "Content-Type": "application/x-www-form-urlencoded"},
@@ -213,7 +235,7 @@ def is_searchable(set_num):
 def search_listings(token, set_num):
     """One API call. Returns raw itemSummaries, or None on failure."""
     num = base_number(set_num)
-    resp = requests.get(
+    resp = HTTP.get(
         EBAY_SEARCH_URL,
         headers={"Authorization": f"Bearer {token}",
                  "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE,
@@ -487,6 +509,7 @@ def main():
 
     rows = []
     attempted = []
+    saved = 0            # already flushed to the database this run
     too_thin = 0
     failed = 0
 
@@ -566,6 +589,18 @@ def main():
 
         if row:
             rows.append(row)
+
+            # Flush every fifty. A run that dies at set 150 should keep the
+            # 129 comps it already measured rather than discarding the lot —
+            # the previous version lost everything to one dropped connection.
+            if not PROBE and len(rows) >= 50:
+                try:
+                    write_comps(client, rows)
+                    mark_checked(client, attempted)
+                    saved += len(rows)
+                    rows, attempted = [], []
+                except Exception as exc:
+                    log(f"    flush failed, keeping in memory: {str(exc)[:80]}")
         else:
             too_thin += 1
 
@@ -579,7 +614,7 @@ def main():
         log("PROBE complete. Nothing was written.")
         return
 
-    written = write_comps(client, rows) if rows else 0
+    written = saved + (write_comps(client, rows) if rows else 0)
     if attempted:
         mark_checked(client, attempted)
 

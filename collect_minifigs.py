@@ -27,9 +27,31 @@ Environment
 import os, sys, time, hmac, hashlib, base64, random, urllib.parse
 from datetime import datetime, timezone
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ---------------------------------------------------------------------------
+# One session, with retries.
+#
+# A single TCP reset from eBay killed a whole run and threw away 129 comps
+# already gathered — the network is not reliable and a collector that assumes
+# it is will keep dying halfway. This retries connection errors and 5xx
+# responses five times with a widening backoff, and reuses connections, which
+# also makes every run a little faster.
+# ---------------------------------------------------------------------------
+HTTP = requests.Session()
+HTTP.mount("https://", HTTPAdapter(
+    max_retries=Retry(
+        total=5, connect=5, read=5, backoff_factor=1.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    ),
+    pool_connections=10, pool_maxsize=20,
+))
 from supabase import create_client
 
-VERSION = "3.0-bricklink"
+VERSION = "3.1-resilient"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -62,7 +84,7 @@ def bl_get(path, params=None):
     sig = base64.b64encode(hmac.new(f"{q(CS)}&{q(TS)}".encode(), base.encode(), hashlib.sha1).digest()).decode()
     o["oauth_signature"] = sig
     hdr = "OAuth " + ", ".join(f'{q(k)}="{q(v)}"' for k, v in sorted(o.items()))
-    r = requests.get(url, params=params, headers={"Authorization": hdr}, timeout=30)
+    r = HTTP.get(url, params=params, headers={"Authorization": hdr}, timeout=30)
     if r.status_code == 429: return "RATE_LIMIT"
     try: body = r.json()
     except Exception: return None
@@ -90,7 +112,7 @@ def rb_get(path, params=None, attempt=0):
     wait = 1.1 - (time.time() - RB_LAST[0])
     if wait > 0: time.sleep(wait)
     RB_LAST[0] = time.time()
-    r = requests.get(RB + path, params=params or {}, headers={"Authorization": f"key {RB_KEY}"}, timeout=30)
+    r = HTTP.get(RB + path, params=params or {}, headers={"Authorization": f"key {RB_KEY}"}, timeout=30)
     if r.status_code == 429:
         pause = min(60, 5 * (2 ** attempt))
         log(f"    Rebrickable throttled us — waiting {pause}s (attempt {attempt + 1})")
