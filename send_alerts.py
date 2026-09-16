@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "1.4-perset-fix"
+VERSION = "2.0-branded"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -67,6 +67,100 @@ SITE_URL = (os.environ.get("SITE_URL") or "https://www.brickmargin.com").rstrip(
 COOLDOWN_HOURS = int(os.environ.get("COOLDOWN_HOURS") or 72)
 MAX_PER_EMAIL = int(os.environ.get("MAX_PER_EMAIL") or 12)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
+
+
+CAMPAIGN = os.environ.get("EBAY_CAMPAIGN_ID", "5339178457").strip()
+
+
+def affiliate(url):
+    """The same tracking the site uses, so an email click earns like any other."""
+    if not url or not CAMPAIGN:
+        return url or ""
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        u = urlparse(url); q = dict(parse_qsl(u.query))
+        q.update({"mkevt": "1", "mkcid": "1", "mkrid": "711-53200-19255-0",
+                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001", "customid": "alert"})
+        return urlunparse(u._replace(query=urlencode(q)))
+    except Exception:
+        return url
+
+
+def build_html(name, items, site="https://www.brickmargin.com"):
+    """
+    An email that looks like the site it came from.
+
+    The old one was grey text on white and read like a system notice. This is
+    the same yellow block, black border and heavy type people see on the site,
+    built from tables and inline styles because that is the only thing every
+    mail client agrees on.
+    """
+    rows = []
+    for it in items:
+        figure = it.get("figure") or ""
+        colour = it.get("colour") or "#1A1A1A"
+        buy = it.get("buy_url")
+        button = (
+            f'<a href="{buy}" style="display:inline-block;background:#E3000B;color:#ffffff;'
+            f'font-weight:800;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:999px;'
+            f'border:2px solid #1A1A1A">Open the listing on eBay &rarr;</a>'
+        ) if buy else (
+            f'<a href="{site}/set/{it["set_num"]}" style="display:inline-block;background:#FFD500;color:#1A1A1A;'
+            f'font-weight:800;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:999px;'
+            f'border:2px solid #1A1A1A">See the set &rarr;</a>'
+        )
+        img = (f'<img src="{it["image_url"]}" width="96" height="96" alt="" '
+               f'style="display:block;border:2px solid #1A1A1A;border-radius:10px;background:#fff">'
+               ) if it.get("image_url") else ""
+        rows.append(f"""
+        <tr><td style="padding:0 0 12px">
+          <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                 style="border:3px solid #1A1A1A;border-radius:16px;background:#ffffff;border-top:8px solid {colour}">
+            <tr>
+              <td width="120" style="padding:14px 0 14px 14px;vertical-align:top">{img}</td>
+              <td style="padding:14px;vertical-align:top;font-family:Inter,Helvetica,Arial,sans-serif;color:#1A1A1A">
+                <div style="font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:{colour}">{figure}</div>
+                <div style="font-size:18px;font-weight:800;margin:4px 0 2px">{it["name"]}</div>
+                <div style="font-size:14px;font-weight:600;margin-bottom:12px">{it["detail"]}</div>
+                {button}
+              </td>
+            </tr>
+          </table>
+        </td></tr>""")
+
+    greeting = f"Hi {name}," if name else "Hi,"
+    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F6F6F4">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#F6F6F4;padding:24px 12px">
+<tr><td align="center">
+  <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="max-width:560px;width:100%">
+
+    <tr><td style="padding:0 0 18px">
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+             style="background:#FFD500;border:3px solid #1A1A1A;border-radius:20px">
+        <tr><td style="padding:22px 24px;font-family:Inter,Helvetica,Arial,sans-serif;color:#1A1A1A">
+          <div style="font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase">BrickMargin</div>
+          <div style="font-size:24px;font-weight:900;line-height:1.15;margin-top:6px">
+            {len(items)} update{"" if len(items) == 1 else "s"} on sets you watch
+          </div>
+          <div style="font-size:14px;font-weight:600;margin-top:6px">{greeting} here is what moved.</div>
+        </td></tr>
+      </table>
+    </td></tr>
+
+    {"".join(rows)}
+
+    <tr><td style="padding:10px 4px 0;font-family:Inter,Helvetica,Arial,sans-serif;font-size:12px;color:#1A1A1A">
+      <a href="{site}/watchlist" style="color:#1A1A1A;font-weight:800">Your watchlist</a> &nbsp;&middot;&nbsp;
+      <a href="{site}/deals/mine" style="color:#1A1A1A;font-weight:800">All deals on your sets</a> &nbsp;&middot;&nbsp;
+      <a href="{site}/settings" style="color:#1A1A1A">Email settings</a>
+      <div style="margin-top:10px;color:#4A4A4A">
+        Prices include shipping. Links to eBay are affiliate links — buying through them supports the site
+        at no cost to you.
+      </div>
+    </td></tr>
+
+  </table>
+</td></tr></table></body></html>"""
 
 
 def log(msg):
@@ -241,7 +335,7 @@ def main():
 
     deals = {}
     for d in (client.table("live_deals")
-              .select("set_num,total_price,deal_type,pct_off_msrp,discount_pct")
+              .select("set_num,total_price,deal_type,pct_off_msrp,discount_pct,item_url,image_url")
               .in_("set_num", set_nums).execute()).data or []:
         prior = deals.get(d["set_num"])
         if not prior or d["total_price"] < prior["total_price"]:
@@ -349,7 +443,11 @@ def main():
                         "set_num": set_num, "name": name,
                         "detail": f"Listed now · {off}",
                         "figure": usd(d["total_price"]),
-                        "colour": "#0b6b3a",
+                        "colour": "#E3000B",
+                        # straight to the listing, through the campaign, so an
+                        # alert that says "it's cheap" is one tap from buying
+                        "buy_url": affiliate(d.get("item_url")),
+                        "image_url": (d.get("image_url") or "").replace("/s-l225.", "/s-l500."),
                     })
                     sent_rows.append({
                         "user_id": uid, "set_num": set_num, "kind": "deal",
