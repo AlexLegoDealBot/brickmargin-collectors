@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.2-instant"
+VERSION = "1.3-channels"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -50,6 +50,8 @@ PROBE = env("PROBE", "true").lower() != "false"
 # whole purpose is speed. The announcement happens in the same breath as the
 # find, so Discord sees a deal about ninety seconds after it is listed.
 HOOK = (os.environ.get("DISCORD_WEBHOOK") or "").strip()
+HOOK_RETAIL = (os.environ.get("DISCORD_WEBHOOK_RETAIL") or "").strip() or HOOK
+HOOK_MARKET = (os.environ.get("DISCORD_WEBHOOK_MARKET") or "").strip() or HOOK
 CAMPAIGN = (os.environ.get("EBAY_CAMPAIGN_ID") or "5339178457").strip()
 MIN_POST_SCORE = float(os.environ.get("MIN_POST_SCORE") or 4.0)
 
@@ -127,7 +129,7 @@ def announce(d, client):
     off = (f"{pct:.0f}% under retail" if d.get("deal_type") == "retail" else f"{pct:.0f}% under market")
 
     embed = {
-        "author": {"name": f"{band} · just listed",
+        "author": {"name": f"{band} · " + ("under retail — buy it" if d.get("deal_type") == "retail" else "under resale — flip it"),
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "title": d["title"][:240],
         "url": affiliate(d["item_url"]),
@@ -146,8 +148,13 @@ def announce(d, client):
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    # Still in production and under shop price → the "buy it" room.
+    # Retired and under what it resells for → the "flip it" room.
+    target = HOOK_RETAIL if d.get("deal_type") == "retail" else HOOK_MARKET
+    if not target:
+        return
     try:
-        r = HTTP.post(HOOK, json={"embeds": [embed], "username": "BrickMargin",
+        r = HTTP.post(target, json={"embeds": [embed], "username": "BrickMargin",
                                   "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
                       timeout=20)
         if r.status_code < 300:

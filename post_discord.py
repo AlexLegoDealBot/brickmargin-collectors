@@ -19,6 +19,8 @@ from supabase import create_client
 
 SB = os.environ.get("SUPABASE_URL", "").strip(); KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
 HOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
+HOOK_RETAIL = (os.environ.get("DISCORD_WEBHOOK_RETAIL") or "").strip() or HOOK
+HOOK_MARKET = (os.environ.get("DISCORD_WEBHOOK_MARKET") or "").strip() or HOOK
 MIN_SCORE = float(os.environ.get("MIN_SCORE") or 5.0)
 MAX_POSTS = int(os.environ.get("MAX_POSTS") or 8)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
@@ -82,7 +84,7 @@ for d in fresh:
         saving = f"About **{usd(float(d['market_value']) - float(d['total_price']))}** under what it resells for"
 
     embed = {
-        "author": {"name": f"{band} · {d.get('theme') or 'LEGO'}",
+        "author": {"name": f"{band} · " + ("under retail" if d.get("deal_type") == "retail" else "under resale"),
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "title": f"{d['set_name']}",
         "url": affiliate(d["item_url"]),
@@ -104,7 +106,10 @@ for d in fresh:
     embed = {k: v for k, v in embed.items() if v is not None}
     if PROBE:
         log(f"  would post: {d['set_name']} {usd(d['total_price'])} ({off})"); sent += 1; continue
-    r = requests.post(HOOK, json={"embeds": [embed], "username": "BrickMargin",
+    target = HOOK_RETAIL if d.get("deal_type") == "retail" else HOOK_MARKET
+    if not target:
+        continue
+    r = requests.post(target, json={"embeds": [embed], "username": "BrickMargin",
                                   "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}, timeout=20)
     if r.status_code < 300:
         client.table("discord_posts").insert({"item_id": d["item_id"], "set_num": d["set_num"]}).execute()
