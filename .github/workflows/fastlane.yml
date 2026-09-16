@@ -1,0 +1,48 @@
+name: Fast Lane
+
+# The per-set collector is thorough; this one is quick. It loops for fifty
+# minutes sweeping eBay's newest LEGO listings, then exits and is restarted
+# by the next schedule — so a good listing is found within a minute or two
+# of going live rather than hours later.
+on:
+  workflow_dispatch:
+    inputs:
+      probe: { type: boolean, default: true }
+      minutes: { default: '50' }
+      every: { default: '90' }
+  schedule:
+    - cron: '*/55 * * * *'
+
+concurrency:
+  group: fastlane
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+          MINUTES: ${{ github.event.inputs.minutes || '50' }}
+          EVERY: ${{ github.event.inputs.every || '90' }}
+        run: python watch_new.py
+      - name: Post anything new to Discord
+        if: github.event.inputs.probe != 'true'
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          EBAY_CAMPAIGN_ID: '5339178457'
+          PROBE: 'false'
+          MIN_SCORE: '4.0'
+        run: python post_discord.py

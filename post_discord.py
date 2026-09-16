@@ -65,28 +65,47 @@ sent = 0
 for d in fresh:
     off = (f"{round(d['pct_off_msrp'])}% under retail" if d.get("pct_off_msrp") and d.get("deal_type") != "market"
            else f"{round(d['discount_pct'])}% under market")
+    # Colour carries the message before the words do: green for a good
+    # discount, yellow for a fair one, red for the rare ones worth dropping
+    # everything for. A row of these reads at a glance.
+    pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
+    if pct >= 40:   colour, band = 0xE3000B, "🔥 HOT"
+    elif pct >= 25: colour, band = 0xFF8A00, "⭐ Strong"
+    elif pct >= 15: colour, band = 0xFFD500, "👍 Good"
+    else:           colour, band = 0x4CBB17, "Worth a look"
+
+    stars = "█" * max(1, min(10, round(float(d.get("score") or 0)))) + "░" * (10 - max(1, min(10, round(float(d.get("score") or 0)))))
+    saving = ""
+    if d.get("msrp"):
+        saving = f"You save **{usd(float(d['msrp']) - float(d['total_price']))}** off retail"
+    elif d.get("market_value"):
+        saving = f"About **{usd(float(d['market_value']) - float(d['total_price']))}** under what it resells for"
+
     embed = {
-        "title": f"{d['set_name']} — {usd(d['total_price'])}",
+        "author": {"name": f"{band} · {d.get('theme') or 'LEGO'}",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "title": f"{d['set_name']}",
         "url": affiliate(d["item_url"]),
-        "description": f"**{off}**" + (f" · retail {usd(d['msrp'])}" if d.get("msrp") else "")
-                       + (f" · resells {usd(d['market_value'])}" if d.get("market_value") else ""),
-        "color": 0xE3000B,
+        "description": f"## {usd(d['total_price'])}  ·  {off}\n{saving}",
+        "color": colour,
         "thumbnail": {"url": d["image_url"]} if d.get("image_url") else None,
         "fields": [
-            {"name": "Set", "value": f"[{d['set_num'].split('-')[0]}]({SITE}/set/{d['set_num']})", "inline": True},
-            {"name": "Theme", "value": d.get("theme") or "—", "inline": True},
-            {"name": "Score", "value": f"{d.get('score', 0):.1f}/10", "inline": True},
+            {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
+            {"name": "Resells for", "value": usd(d["market_value"]) if d.get("market_value") else "—", "inline": True},
             {"name": "Condition", "value": (d.get("condition") or "new").title(), "inline": True},
-            {"name": "Seller", "value": d.get("seller") or "—", "inline": True},
+            {"name": "Deal score", "value": f"`{stars}` {float(d.get('score') or 0):.1f}", "inline": False},
+            {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin]({SITE}/set/{d['set_num']})", "inline": True},
+            {"name": "Seller", "value": f"{d.get('seller') or '—'}", "inline": True},
         ],
-        "footer": {"text": "BrickMargin · prices include shipping"},
+        "footer": {"text": "BrickMargin · every price includes shipping · tap the title to buy",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     embed = {k: v for k, v in embed.items() if v is not None}
     if PROBE:
         log(f"  would post: {d['set_name']} {usd(d['total_price'])} ({off})"); sent += 1; continue
     r = requests.post(HOOK, json={"embeds": [embed], "username": "BrickMargin",
-                                  "avatar_url": "https://www.brickmargin.com/logo-b-512.png"}, timeout=20)
+                                  "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}, timeout=20)
     if r.status_code < 300:
         client.table("discord_posts").insert({"item_id": d["item_id"], "set_num": d["set_num"]}).execute()
         sent += 1; time.sleep(1.2)          # Discord rate limits webhooks
