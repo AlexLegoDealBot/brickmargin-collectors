@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.0"
+VERSION = "1.1-columns"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -154,10 +154,15 @@ def main():
                 log(f"    skipped — description says \"{flag}\"")
                 continue
 
+            # eBay fees (13.25%), promoted (2%), payment (2.9% + 30c) and
+            # postage come off what a flip would actually clear.
+            net = value - value * 0.1525 - (value * 0.029 + 0.30) - ship
+
             found.append({
                 "item_id": str(item.get("itemId")), "set_num": row["set_num"],
-                "set_name": row["name"], "theme": row.get("theme"), "title": title[:200],
-                "price": round(price, 2), "shipping": round(ship, 2), "total_price": round(total, 2),
+                "title": title[:200],
+                "item_price": round(price, 2), "shipping": round(ship, 2), "total_price": round(total, 2),
+                "net_if_flipped": round(net, 2), "retired": bool(row.get("retired_at")),
                 "market_value": value, "msrp": msrp, "pct_off_msrp": off if kind == "retail" else None,
                 "discount_pct": round((1 - total / value) * 100, 2),
                 "margin_pct": round((value / total - 1) * 100, 2),
@@ -176,8 +181,8 @@ def main():
 
         if found:
             for f in found:
-                log(f"  ★ {f['set_name'][:40]:42} {usd(f['total_price']):>10}  "
-                    f"{f['pct_off_msrp'] or f['discount_pct']:.0f}% off  ({f['deal_type']})")
+                log(f"  ★ {f['title'][:44]:46} {usd(f['total_price']):>10}  "
+                    f"{float(f['pct_off_msrp'] or f['discount_pct']):.0f}% off  ({f['deal_type']})")
             if not PROBE:
                 try:
                     client.table("deals").upsert(found, on_conflict="item_id").execute()
