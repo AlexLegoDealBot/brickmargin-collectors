@@ -26,7 +26,8 @@ MAX_POSTS = int(os.environ.get("MAX_POSTS") or 8)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 SITE = "https://www.brickmargin.com"
 if not (SB and KEY): sys.exit("ERROR: SUPABASE_URL and SUPABASE_SERVICE_KEY required")
-if not HOOK and not PROBE: sys.exit("ERROR: DISCORD_WEBHOOK required unless probing")
+if not (HOOK_RETAIL or HOOK_MARKET) and not PROBE:
+    sys.exit("ERROR: set DISCORD_WEBHOOK_RETAIL and DISCORD_WEBHOOK_MARKET (or DISCORD_WEBHOOK)")
 CAMPAIGN = os.environ.get("EBAY_CAMPAIGN_ID", "5339178457").strip()
 
 def affiliate(url: str) -> str:

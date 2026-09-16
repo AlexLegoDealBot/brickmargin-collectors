@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.3-channels"
+VERSION = "1.4-hookfix"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -106,7 +106,13 @@ def affiliate(url: str) -> str:
 
 def announce(d, client):
     """One deal, straight to Discord, remembered so it is never posted twice."""
-    if not HOOK or float(d.get("score") or 0) < MIN_POST_SCORE:
+    # Still in production and under shop price → the "buy it" room.
+    # Retired and under what it resells for → the "flip it" room.
+    target = HOOK_RETAIL if d.get("deal_type") == "retail" else HOOK_MARKET
+    if not target:
+        return
+    if float(d.get("score") or 0) < MIN_POST_SCORE:
+        log(f"    below post score ({float(d.get('score') or 0):.1f} < {MIN_POST_SCORE}) — not posted")
         return
     try:
         already = (client.table("discord_posts").select("item_id")
@@ -148,11 +154,6 @@ def announce(d, client):
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    # Still in production and under shop price → the "buy it" room.
-    # Retired and under what it resells for → the "flip it" room.
-    target = HOOK_RETAIL if d.get("deal_type") == "retail" else HOOK_MARKET
-    if not target:
-        return
     try:
         r = HTTP.post(target, json={"embeds": [embed], "username": "BrickMargin",
                                   "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
@@ -169,6 +170,8 @@ def announce(d, client):
 
 def main():
     log(f"BrickMargin fast lane — version {VERSION}  probe={PROBE}  {MINUTES}m at {EVERY}s")
+    log(f"  discord: retail={'set' if HOOK_RETAIL else 'MISSING'} · "
+        f"resale={'set' if HOOK_MARKET else 'MISSING'} · post score >= {MIN_POST_SCORE}")
     client = create_client(SB_URL, SB_KEY)
 
     # The catalogue, once, in memory. A set number appearing in a title is
