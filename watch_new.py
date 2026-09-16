@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.1-columns"
+VERSION = "1.2-instant"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -46,6 +46,12 @@ SB_URL = env("SUPABASE_URL"); SB_KEY = env("SUPABASE_SERVICE_KEY")
 APP_ID = env("EBAY_APP_ID"); CERT_ID = env("EBAY_CERT_ID")
 MINUTES = int(env("MINUTES", "50")); EVERY = int(env("EVERY", "90"))
 PROBE = env("PROBE", "true").lower() != "false"
+# Posting after the loop ends would mean a fifty-minute delay on a feed whose
+# whole purpose is speed. The announcement happens in the same breath as the
+# find, so Discord sees a deal about ninety seconds after it is listed.
+HOOK = (os.environ.get("DISCORD_WEBHOOK") or "").strip()
+CAMPAIGN = (os.environ.get("EBAY_CAMPAIGN_ID") or "5339178457").strip()
+MIN_POST_SCORE = float(os.environ.get("MIN_POST_SCORE") or 4.0)
 
 def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${float(n):,.2f}"
@@ -81,6 +87,78 @@ def newest(tok, limit=200):
     if r.status_code != 200:
         log(f"  HTTP {r.status_code}"); return []
     return r.json().get("itemSummaries", []) or []
+
+def affiliate(url: str) -> str:
+    """Every link out earns, wherever it is posted."""
+    if not url or not CAMPAIGN:
+        return url
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        u = urlparse(url); q = dict(parse_qsl(u.query))
+        q.update({"mkevt": "1", "mkcid": "1", "mkrid": "711-53200-19255-0",
+                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001", "customid": "discord"})
+        return urlunparse(u._replace(query=urlencode(q)))
+    except Exception:
+        return url
+
+
+def announce(d, client):
+    """One deal, straight to Discord, remembered so it is never posted twice."""
+    if not HOOK or float(d.get("score") or 0) < MIN_POST_SCORE:
+        return
+    try:
+        already = (client.table("discord_posts").select("item_id")
+                   .eq("item_id", d["item_id"]).limit(1).execute()).data
+        if already:
+            return
+    except Exception:
+        pass
+
+    pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
+    if pct >= 40:   colour, band = 0xE3000B, "🔥 HOT"
+    elif pct >= 25: colour, band = 0xFF8A00, "⭐ Strong"
+    elif pct >= 15: colour, band = 0xFFD500, "👍 Good"
+    else:           colour, band = 0x4CBB17, "Worth a look"
+    n = max(1, min(10, round(float(d.get("score") or 0))))
+    bar = "█" * n + "░" * (10 - n)
+    saving = (f"You save **{usd(float(d['msrp']) - float(d['total_price']))}** off retail"
+              if d.get("msrp") else
+              f"About **{usd(float(d['market_value']) - float(d['total_price']))}** under what it resells for")
+    off = (f"{pct:.0f}% under retail" if d.get("deal_type") == "retail" else f"{pct:.0f}% under market")
+
+    embed = {
+        "author": {"name": f"{band} · just listed",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "title": d["title"][:240],
+        "url": affiliate(d["item_url"]),
+        "description": f"## {usd(d['total_price'])}  ·  {off}\n{saving}",
+        "color": colour,
+        "thumbnail": {"url": d["image_url"]} if d.get("image_url") else None,
+        "fields": [
+            {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
+            {"name": "Resells for", "value": usd(d["market_value"]), "inline": True},
+            {"name": "Condition", "value": (d.get("condition") or "new").title(), "inline": True},
+            {"name": "Deal score", "value": f"`{bar}` {float(d.get('score') or 0):.1f}", "inline": False},
+            {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin](https://www.brickmargin.com/set/{d['set_num']})", "inline": True},
+            {"name": "Seller", "value": d.get("seller") or "—", "inline": True},
+        ],
+        "footer": {"text": "BrickMargin · price includes shipping · tap the title to buy",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r = HTTP.post(HOOK, json={"embeds": [embed], "username": "BrickMargin",
+                                  "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+                      timeout=20)
+        if r.status_code < 300:
+            client.table("discord_posts").upsert(
+                {"item_id": d["item_id"], "set_num": d["set_num"]}, on_conflict="item_id").execute()
+            time.sleep(1.2)          # Discord rate-limits webhooks
+        else:
+            log(f"    discord HTTP {r.status_code}")
+    except Exception as exc:
+        log(f"    discord failed: {str(exc)[:80]}")
+
 
 def main():
     log(f"BrickMargin fast lane — version {VERSION}  probe={PROBE}  {MINUTES}m at {EVERY}s")
@@ -187,6 +265,8 @@ def main():
                 try:
                     client.table("deals").upsert(found, on_conflict="item_id").execute()
                     posted += len(found)
+                    for f in sorted(found, key=lambda x: -float(x.get("score") or 0)):
+                        announce(f, client)
                 except Exception as exc:
                     log(f"    write failed: {str(exc)[:100]}")
         log(f"  sweep {sweeps}: {len(items)} listings, {len(fresh)} new, {len(found)} deals")

@@ -34,15 +34,7 @@ jobs:
           PROBE: ${{ github.event.inputs.probe || 'false' }}
           MINUTES: ${{ github.event.inputs.minutes || '50' }}
           EVERY: ${{ github.event.inputs.every || '90' }}
-        run: python watch_new.py
-      - name: Post anything new to Discord
-        if: github.event.inputs.probe != 'true'
-        continue-on-error: true
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           EBAY_CAMPAIGN_ID: '5339178457'
-          PROBE: 'false'
-          MIN_SCORE: '4.0'
-        run: python post_discord.py
+          MIN_POST_SCORE: '4.0'
+        run: python watch_new.py
