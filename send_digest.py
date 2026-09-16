@@ -25,6 +25,23 @@ FROM = os.environ.get("FROM_EMAIL") or "BrickMargin <alerts@brickmargin.com>"
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 SITE = "https://www.brickmargin.com"
 if not (SB and KEY): sys.exit("ERROR: SUPABASE_URL and SUPABASE_SERVICE_KEY required")
+CAMPAIGN = os.environ.get("EBAY_CAMPAIGN_ID", "5339178457").strip()
+
+
+def affiliate(url):
+    """The weekly digest was the one channel still sending bare eBay links."""
+    if not url or not CAMPAIGN:
+        return url or ""
+    try:
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        u = urlparse(url); q = dict(parse_qsl(u.query))
+        q.update({"mkevt": "1", "mkcid": "1", "mkrid": "711-53200-19255-0",
+                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001", "customid": "digest"})
+        return urlunparse(u._replace(query=urlencode(q)))
+    except Exception:
+        return url
+
+
 def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${round(float(n)):,}"
 
@@ -60,7 +77,7 @@ for uid, sets in by_user.items():
         now_v = float(v["market_value"]); was = old.get(n)
         chg = f"{'+' if now_v >= was else ''}{round((now_v/float(was)-1)*100)}%" if was else "new"
         d = deals.get(n)
-        deal = f' &nbsp;·&nbsp; <a href="{d["item_url"]}" style="color:#E3000B;font-weight:700">on sale at {usd(d["total_price"])}</a>' if d else ""
+        deal = f' &nbsp;·&nbsp; <a href="{affiliate(d["item_url"])}" style="color:#E3000B;font-weight:700">on sale at {usd(d["total_price"])}</a>' if d else ""
         rows.append(f'<tr><td style="padding:10px 0;border-bottom:1px solid #eee"><a href="{SITE}/set/{n}" style="color:#1A1A1A;font-weight:700;text-decoration:none">{v["name"]}</a>'
                     f'<div style="font-size:13px;color:#1A1A1A">{usd(now_v)} &nbsp;·&nbsp; {chg} this week &nbsp;·&nbsp; {v.get("comp_count") or 0} listings{deal}</div></td></tr>')
     if not rows: continue
