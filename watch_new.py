@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.4-hookfix"
+VERSION = "1.5-bigimages"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -104,6 +104,14 @@ def affiliate(url: str) -> str:
         return url
 
 
+def big_image(url: str) -> str:
+    """eBay encodes the size in the filename — s-l225 is a thumbnail, s-l1600
+    is the full photograph. Swapping it costs nothing and fills the embed."""
+    if not url:
+        return url
+    return re.sub(r"/s-l\d+\.", "/s-l1600.", url)
+
+
 def announce(d, client):
     """One deal, straight to Discord, remembered so it is never posted twice."""
     # Still in production and under shop price → the "buy it" room.
@@ -137,11 +145,15 @@ def announce(d, client):
     embed = {
         "author": {"name": f"{band} · " + ("under retail — buy it" if d.get("deal_type") == "retail" else "under resale — flip it"),
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
-        "title": d["title"][:240],
+        "title": (d.get("set_name") or d["title"])[:240],
         "url": affiliate(d["item_url"]),
-        "description": f"## {usd(d['total_price'])}  ·  {off}\n{saving}",
+        "description": (
+            f"## {usd(d['total_price'])}  ·  {off}\n"
+            f"{saving}\n\n"
+            f"*{d['title'][:140]}*"
+        ),
         "color": colour,
-        "thumbnail": {"url": d["image_url"]} if d.get("image_url") else None,
+        "image": {"url": big_image(d["image_url"])} if d.get("image_url") else None,
         "fields": [
             {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
             {"name": "Resells for", "value": usd(d["market_value"]), "inline": True},
@@ -276,7 +288,10 @@ def main():
                     client.table("deals").upsert(found, on_conflict="item_id").execute()
                     posted += len(found)
                     for f in sorted(found, key=lambda x: -float(x.get("score") or 0)):
-                        announce(f, client)
+                        # the catalogue is already in memory; give the embed a
+                        # clean set name rather than a seller's title
+                        cat = by_number.get(f["set_num"].split("-")[0]) or {}
+                        announce({**f, "set_name": cat.get("name"), "theme": cat.get("theme")}, client)
                 except Exception as exc:
                     log(f"    write failed: {str(exc)[:100]}")
         log(f"  sweep {sweeps}: {len(items)} listings, {len(fresh)} new, {len(found)} deals")

@@ -91,7 +91,7 @@ for d in fresh:
         "url": affiliate(d["item_url"]),
         "description": f"## {usd(d['total_price'])}  ·  {off}\n{saving}",
         "color": colour,
-        "thumbnail": {"url": d["image_url"]} if d.get("image_url") else None,
+        "image": {"url": re.sub(r"/s-l\d+\.", "/s-l1600.", d["image_url"])} if d.get("image_url") else None,
         "fields": [
             {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
             {"name": "Resells for", "value": usd(d["market_value"]) if d.get("market_value") else "—", "inline": True},
