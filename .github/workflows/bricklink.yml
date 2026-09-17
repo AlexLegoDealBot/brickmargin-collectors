@@ -6,6 +6,10 @@ name: BrickLink Sold Prices
 on:
   workflow_dispatch:
     inputs:
+      part_out:
+        description: 'Also work out part-out values for sets over $60 (slower)'
+        type: boolean
+        default: false
       probe:
         description: 'Probe — print what it finds, write nothing'
         type: boolean
@@ -35,5 +39,6 @@ jobs:
           BRICKLINK_TOKEN: ${{ secrets.BRICKLINK_TOKEN }}
           BRICKLINK_TOKEN_SECRET: ${{ secrets.BRICKLINK_TOKEN_SECRET }}
           PROBE: ${{ github.event.inputs.probe || 'false' }}
+          PART_OUT: ${{ github.event.inputs.part_out || 'true' }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '500' }}
         run: python collect_bricklink.py

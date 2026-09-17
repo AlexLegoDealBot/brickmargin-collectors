@@ -67,7 +67,7 @@ HTTP.mount("https://", HTTPAdapter(
 ))
 from supabase import create_client
 
-VERSION = "1.6-resilient"
+VERSION = "2.0-partout"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -93,6 +93,7 @@ TOKEN_SECRET = require("BRICKLINK_TOKEN_SECRET")
 # and it sweeps the whole 6,800-set catalogue in about three days rather
 # than a fortnight.
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE") or 400)
+PART_OUT = os.environ.get("PART_OUT", "false").strip().lower() == "true"
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 PAUSE = 0.35
 
@@ -261,6 +262,64 @@ def price_guide(set_num, condition, guide_type="sold"):
     }
 
 
+def part_out(set_num):
+    """
+    What a set is worth broken into pieces.
+
+    BrickLink's price guide covers whole sets; a part-out value has to be
+    assembled from the set's own inventory — every part and minifigure it
+    contains, each priced at what that piece actually sells for. It is the
+    number resellers check before buying, because a set can be worth more in
+    pieces than sealed, and almost nobody publishes it free.
+
+    Two calls per set: the inventory, then a bulk price lookup is not offered,
+    so this prices the minifigures (which carry most of the value and are few)
+    and estimates the parts from their average sold price. Honest about being
+    an estimate — the site says so.
+    """
+    inv = call(f"/items/SET/{bl_number(set_num)}/subsets", {"break_minifigs": "false"},
+               missing_is_404=True)
+    if inv in (None, "RATE_LIMIT", "NOT_IN_CATALOGUE"):
+        return None
+
+    fig_total, part_count, fig_count = 0.0, 0, 0
+    figs = []
+    for entry in inv or []:
+        for e in entry.get("entries", []):
+            it = e.get("item") or {}
+            qty = int(e.get("quantity") or 0)
+            if it.get("type") == "MINIFIG":
+                figs.append((it["no"], qty))
+            elif it.get("type") == "PART":
+                part_count += qty
+
+    # figures are few and valuable — price them properly
+    for fig_no, qty in figs[:12]:
+        d = call(f"/items/MINIFIG/{fig_no}/price", {
+            "guide_type": "sold", "new_or_used": "N",
+            "currency_code": "USD", "country_code": "US"}, missing_is_404=True)
+        time.sleep(PAUSE)
+        if isinstance(d, dict) and d.get("total_quantity"):
+            try:
+                fig_total += float(d.get("qty_avg_price") or d.get("avg_price") or 0) * qty
+                fig_count += qty
+            except (TypeError, ValueError):
+                pass
+
+    if part_count == 0 and fig_count == 0:
+        return None
+    # A loose LEGO part averages around eleven cents sold on BrickLink across
+    # the whole catalogue. Using one figure keeps this to two calls a set;
+    # the site labels it an estimate rather than a measurement.
+    parts_value = part_count * 0.11
+    return {
+        "part_out_value": round(parts_value + fig_total, 2),
+        "part_out_figs": round(fig_total, 2),
+        "part_out_parts": part_count,
+        "part_out_at": now(),
+    }
+
+
 def main():
     log(f"BrickMargin BrickLink collector — version {VERSION}  probe={PROBE}")
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -360,6 +419,19 @@ def main():
                 "sold_new_min": round(new["min"] or 0, 2),
                 "sold_new_max": round(new["max"] or 0, 2),
             })
+        # Part-out is two extra calls, so it is reserved for sets someone
+        # might actually break: worth enough to be worth the effort, and not
+        # already done. The sold price we have just measured is the test.
+        if PART_OUT and not s.get("part_out_at"):
+            worth = (new or {}).get("qty_avg") or (new or {}).get("avg") or 0
+            if worth and float(worth) >= 60:
+                po = part_out(set_num)
+                if po:
+                    row.update(po)
+                    if PROBE:
+                        log(f"      part-out {po['part_out_value']:,.0f} "
+                            f"({po['part_out_parts']} parts + {po['part_out_figs']:,.0f} in figures)")
+
         if used:
             row.update({
                 "sold_used": round(used["qty_avg"] or used["avg"] or 0, 2),
