@@ -1,49 +1,75 @@
 name: Fast Lane
 
-# Continuous cover, built to survive GitHub's scheduling.
+# Continuous cover that does not depend on GitHub's scheduler.
 #
-# The old cron said */55, which fires at :00 and :55 — two runs an hour with
-# a 45-minute hole between them, not "every 55 minutes". And GitHub delays
-# scheduled jobs under load, sometimes by ten minutes or more, so one long
-# run per hour leaves gaps whenever that happens.
+# GitHub runs scheduled workflows on a best-effort basis: under load it
+# delays them, and it silently drops runs it cannot fit. A */15 cron looked
+# right and produced one run an hour — which is why coverage kept vanishing.
 #
-# Short overlapping runs fix both: a fifteen-minute cadence with fourteen
-# minutes of scanning means a delayed start is covered by the next one, and
-# no gap is ever longer than a single cycle.
+# So the schedule is only a safety net now. The real mechanism is that each
+# run starts the next one when it finishes. A chain like that has no gaps
+# because nothing has to be scheduled: the run that just ended is what
+# triggers the one that follows.
 on:
   workflow_dispatch:
     inputs:
       probe: { type: boolean, default: false }
-      minutes: { default: '14' }
+      minutes: { default: '25' }
       every: { default: '90' }
+      chain:
+        description: 'Start the next run when this one finishes (leave on for continuous cover)'
+        type: boolean
+        default: true
   schedule:
-    - cron: '*/15 * * * *'
+    # A net, not the mechanism: if the chain ever breaks, this restarts it.
+    - cron: '7,37 * * * *'
 
 concurrency:
   group: fastlane
   cancel-in-progress: false
 
+permissions:
+  actions: write          # needed to start the next run in the chain
+  contents: read
+
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-          cache: pip            # ~30s a run back, which matters at 96 runs a day
+          cache: pip
       - run: pip install -r requirements.txt
-      - env:
+
+      - name: Scan eBay
+        env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           PROBE: ${{ github.event.inputs.probe || 'false' }}
-          MINUTES: ${{ github.event.inputs.minutes || '14' }}
+          MINUTES: ${{ github.event.inputs.minutes || '25' }}
           EVERY: ${{ github.event.inputs.every || '90' }}
           DISCORD_WEBHOOK_RETAIL: ${{ secrets.DISCORD_WEBHOOK_RETAIL }}
           DISCORD_WEBHOOK_MARKET: ${{ secrets.DISCORD_WEBHOOK_MARKET }}
           EBAY_CAMPAIGN_ID: '5339178457'
           MIN_POST_SCORE: '4.0'
         run: python watch_new.py
+
+      # Hand off to the next run. `always()` so a crash still restarts the
+      # chain — an unattended scanner that stops on one bad sweep is worse
+      # than no scanner, because you believe it is running.
+      - name: Start the next run
+        if: always() && github.event.inputs.chain != 'false' && github.event.inputs.probe != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run fastlane.yml \
+            --repo "${{ github.repository }}" \
+            --field probe=false \
+            --field minutes=25 \
+            --field every=90 \
+            --field chain=true
