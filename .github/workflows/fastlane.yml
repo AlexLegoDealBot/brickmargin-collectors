@@ -1,17 +1,23 @@
 name: Fast Lane
 
-# The per-set collector is thorough; this one is quick. It loops for fifty
-# minutes sweeping eBay's newest LEGO listings, then exits and is restarted
-# by the next schedule — so a good listing is found within a minute or two
-# of going live rather than hours later.
+# Continuous cover, built to survive GitHub's scheduling.
+#
+# The old cron said */55, which fires at :00 and :55 — two runs an hour with
+# a 45-minute hole between them, not "every 55 minutes". And GitHub delays
+# scheduled jobs under load, sometimes by ten minutes or more, so one long
+# run per hour leaves gaps whenever that happens.
+#
+# Short overlapping runs fix both: a fifteen-minute cadence with fourteen
+# minutes of scanning means a delayed start is covered by the next one, and
+# no gap is ever longer than a single cycle.
 on:
   workflow_dispatch:
     inputs:
-      probe: { type: boolean, default: true }
-      minutes: { default: '50' }
+      probe: { type: boolean, default: false }
+      minutes: { default: '14' }
       every: { default: '90' }
   schedule:
-    - cron: '*/55 * * * *'
+    - cron: '*/15 * * * *'
 
 concurrency:
   group: fastlane
@@ -20,11 +26,13 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 58
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
-        with: { python-version: '3.12' }
+        with:
+          python-version: '3.12'
+          cache: pip            # ~30s a run back, which matters at 96 runs a day
       - run: pip install -r requirements.txt
       - env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -32,9 +40,8 @@ jobs:
           EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           PROBE: ${{ github.event.inputs.probe || 'false' }}
-          MINUTES: ${{ github.event.inputs.minutes || '50' }}
+          MINUTES: ${{ github.event.inputs.minutes || '14' }}
           EVERY: ${{ github.event.inputs.every || '90' }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           DISCORD_WEBHOOK_RETAIL: ${{ secrets.DISCORD_WEBHOOK_RETAIL }}
           DISCORD_WEBHOOK_MARKET: ${{ secrets.DISCORD_WEBHOOK_MARKET }}
           EBAY_CAMPAIGN_ID: '5339178457'
