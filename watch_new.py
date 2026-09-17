@@ -22,7 +22,7 @@ Environment: SUPABASE_URL, SUPABASE_SERVICE_KEY, EBAY_APP_ID, EBAY_CERT_ID
              EVERY     seconds between sweeps, default 90
              PROBE     default true
 """
-import base64, os, sys, time
+import base64, os, re, sys, time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.5-bigimages"
+VERSION = "1.6-importfix"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -215,7 +215,6 @@ def main():
         for item in fresh:
             title = item.get("title", "")
             # a set number in the title is the only cheap way to match
-            import re
             nums = re.findall(r"(?<!\d)(\d{4,7})(?!\d)", title)
             row = next((by_number[n] for n in nums if n in by_number), None)
             if not row: continue
@@ -287,13 +286,20 @@ def main():
                 try:
                     client.table("deals").upsert(found, on_conflict="item_id").execute()
                     posted += len(found)
+                except Exception as exc:
+                    log(f"    database write failed: {str(exc)[:100]}")
+
+                # Announcing is a separate concern: a Discord problem should
+                # never look like a database problem, and it must not stop
+                # the next sweep.
+                try:
                     for f in sorted(found, key=lambda x: -float(x.get("score") or 0)):
                         # the catalogue is already in memory; give the embed a
                         # clean set name rather than a seller's title
                         cat = by_number.get(f["set_num"].split("-")[0]) or {}
                         announce({**f, "set_name": cat.get("name"), "theme": cat.get("theme")}, client)
                 except Exception as exc:
-                    log(f"    write failed: {str(exc)[:100]}")
+                    log(f"    discord post failed: {type(exc).__name__}: {str(exc)[:100]}")
         log(f"  sweep {sweeps}: {len(items)} listings, {len(fresh)} new, {len(found)} deals")
         time.sleep(EVERY)
 
