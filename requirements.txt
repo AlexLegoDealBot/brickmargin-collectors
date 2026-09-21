@@ -1,2 +1,3 @@
-requests>=2.31,<3.0
-supabase>=2.20,<3.0
+requests>=2.32
+supabase>=2.9
+python-dateutil>=2.9

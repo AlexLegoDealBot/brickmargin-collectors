@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.6-importfix"
+VERSION = "1.7-sealedonly"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -82,7 +82,7 @@ def newest(tok, limit=200):
     r = HTTP.get(f"{EBAY}/buy/browse/v1/item_summary/search",
         headers={"Authorization": f"Bearer {tok}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
         params={"q": "lego", "category_ids": "19006", "limit": limit,
-                "sort": "newlyListed", "filter": "buyingOptions:{FIXED_PRICE},itemLocationCountry:US"},
+                "sort": "newlyListed", "filter": "conditions:{NEW},buyingOptions:{FIXED_PRICE},itemLocationCountry:US"},
         timeout=30)
     if r.status_code == 429:
         log("  rate limited — backing off 60s"); time.sleep(60); return []
@@ -224,6 +224,10 @@ def main():
 
             try: price = float(item["price"]["value"])
             except Exception: continue
+            # sealed only, same as the slow lane
+            if (condition_of(item) or "").lower() != "new":
+                continue
+
             ship = shipping_cost(item)
             if ship is None:
                 ship = 0.0 if price >= 50 else 8.0      # eBay omits it on free shipping

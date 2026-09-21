@@ -64,7 +64,7 @@ HTTP.mount("https://", HTTPAdapter(
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "4.1-resilient"
+VERSION = "4.2-sealedonly"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -166,6 +166,12 @@ MAX_SETS = int(num_env("MAX_SETS", 1200))
 # One extra call per listing that survives every title filter — a few dozen a
 # run. Two bad deals a week costs more trust than the quota ever will.
 CHECK_DESCRIPTIONS = os.environ.get("CHECK_DESCRIPTIONS", "true").strip().lower() != "false"
+# Sealed only on the deals board. Used listings were the source of nearly
+# every bad deal: a "complete" used set is a claim, not a fact, and no title
+# or description filter can verify it. Used prices still appear on set pages,
+# measured from BrickLink's completed sales where a grade actually means
+# something. Set ALLOW_USED=true to put them back.
+CONDITIONS = "NEW" if os.environ.get("ALLOW_USED", "false").strip().lower() != "true" else "NEW|USED"
 MIN_VALUE = num_env("MIN_VALUE", 40)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 
@@ -544,7 +550,7 @@ def condition_of(item):
     return None
 
 
-def search(token, set_num, condition_filter="NEW|USED"):
+def search(token, set_num, condition_filter=None):
     """
     One call per set, both conditions at once.
 
@@ -558,7 +564,7 @@ def search(token, set_num, condition_filter="NEW|USED"):
                  "Content-Type": "application/json"},
         params={
             "q": f"LEGO {base_number(set_num)}",
-            "filter": f"conditions:{{{condition_filter}}},buyingOptions:{{FIXED_PRICE}}",
+            "filter": f"conditions:{{{condition_filter or CONDITIONS}}},buyingOptions:{{FIXED_PRICE}}",
             # eBay's own "LEGO Complete Sets & Packs" category. The single
             # most effective filter available — it excludes the parts,
             # minifigure and instruction categories at source.
@@ -846,6 +852,10 @@ def main():
             # Last gate, and the only one that reads the listing rather than
             # its title: a 10302 sold as loose bags and a 75454 that is really
             # just the escape pod both said so here and nowhere else.
+            if CONDITIONS == "NEW" and (deal.get("condition") or "").lower() != "new":
+                reject("condition is not sealed")
+                continue
+
             if CHECK_DESCRIPTIONS:
                 raw = str(item.get("itemId", ""))
                 flag = description_rejects(raw, token)

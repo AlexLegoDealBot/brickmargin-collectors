@@ -67,7 +67,7 @@ HTTP.mount("https://", HTTPAdapter(
 ))
 from supabase import create_client
 
-VERSION = "2.0-partout"
+VERSION = "2.1-partout"
 
 API = "https://api.bricklink.com/api/store/v1"
 
@@ -316,7 +316,7 @@ def part_out(set_num):
         "part_out_value": round(parts_value + fig_total, 2),
         "part_out_figs": round(fig_total, 2),
         "part_out_parts": part_count,
-        "part_out_at": now(),
+        "part_out_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -425,7 +425,14 @@ def main():
         if PART_OUT and not s.get("part_out_at"):
             worth = (new or {}).get("qty_avg") or (new or {}).get("avg") or 0
             if worth and float(worth) >= 60:
-                po = part_out(set_num)
+                # Part-out is a bonus on top of the sold prices. If it fails
+                # for one set, that set simply goes without — losing a whole
+                # 500-set sweep to it would be absurd.
+                try:
+                    po = part_out(set_num)
+                except Exception as exc:
+                    log(f"      part-out failed: {type(exc).__name__}: {str(exc)[:70]}")
+                    po = None
                 if po:
                     row.update(po)
                     if PROBE:
