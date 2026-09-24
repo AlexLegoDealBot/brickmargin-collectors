@@ -1,7 +1,7 @@
 name: Comps Collector
 
 # Rotates through the catalog gathering eBay resale prices.
-# eBay allows 5,000 Browse calls/day. Four runs x 400 sets = 1,600/day,
+# eBay allows 5,000 Browse calls/day. Eight runs x 600 sets = 4,800/day,
 # so the full ~6,700-set catalog cycles about every 4 days with headroom.
 
 on:
@@ -13,7 +13,7 @@ on:
         default: true
       batch_size:
         description: 'Sets to process this run'
-        default: '400'
+        default: '600'
       min_listings:
         description: 'Minimum surviving listings before a comp is recorded'
         default: '3'
@@ -22,7 +22,7 @@ on:
         type: boolean
         default: false
   schedule:
-    # Every 3 hours — 8 runs a day at 400 sets is 3,200 calls against eBay's
+    # Every 3 hours — 8 runs a day at 600 sets is 4,800 calls against eBay's
     # 5,000/day ceiling, so a full catalog cycle lands in about 2 days instead
     # of 4. Staggered off the hour to avoid peak API contention.
     - cron: '20 1,4,7,10,13,16,19,22 * * *'
@@ -53,7 +53,7 @@ jobs:
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           # Scheduled runs get no inputs, so these fall back to full defaults.
           PROBE: ${{ github.event.inputs.probe == 'true' && '1' || '' }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size || '400' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '600' }}
           MIN_LISTINGS: ${{ github.event.inputs.min_listings || '3' }}
           STRICT_SEALED: ${{ github.event.inputs.strict_sealed == 'true' && '1' || '' }}
         run: python collect_comps.py

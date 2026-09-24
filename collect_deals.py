@@ -64,7 +64,7 @@ HTTP.mount("https://", HTTPAdapter(
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "4.2-sealedonly"
+VERSION = "4.3-bags"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -376,6 +376,17 @@ PART_PATTERNS = (
     r"dragons?|vehicles?|cars?|ships?|droids?)\s+(only|alone|from)\b",
     r"\bno\s+(box|set|build|building|instructions?|minifigs?|bricks?)\b",
     r"\bjust\s+(the\s+)?\w+\b",
+    # A numbered bag is factory-sealed, so eBay's condition really is NEW —
+    # but it is one bag out of a set, not the set. "Bag #4", "bags 1-3",
+    # "sealed bag 2". This is the gap the Carnotaurus listing walked through.
+    r"\bbags?\s*#?\s*\d+\b",
+    r"\bbags?\s*\d+\s*(-|to|&|and)\s*\d+\b",
+    r"\b(sealed|inner|numbered)\s+bags?\b",
+    r"\bpart\s+\d+\s+of\s+\d+\b",
+    r"\b\d+\s*of\s*\d+\s+bags?\b",
+    # instruction manuals and sticker sheets sold alone are "new" too
+    r"\b(instructions?|manual|stickers?|sticker\s+sheet|box)\s+only\b",
+    r"\bempty\s+box\b",
 )
 
 # A used listing must claim the set is whole.
