@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "2.0-branded"
+VERSION = "2.1-sitelook"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -86,81 +86,129 @@ def affiliate(url):
         return url
 
 
+def photo_for(item, values):
+    """
+    A photograph an inbox will actually load. Gmail fetches images through
+    its own servers, and BrickLink's host refuses server requests, so its
+    photos come through blank. A deal carries the eBay listing photo; anything
+    else uses the catalogue image from Rebrickable, which serves anyone.
+    """
+    if item.get("image_url") and "bricklink" not in item["image_url"]:
+        return item["image_url"]
+    v = values.get(item.get("set_num")) or {}
+    return v.get("catalog_image") or None
+
+
 def build_html(name, items, site="https://www.brickmargin.com"):
     """
     An email that looks like the site it came from.
 
-    The old one was grey text on white and read like a system notice. This is
-    the same yellow block, black border and heavy type people see on the site,
-    built from tables and inline styles because that is the only thing every
-    mail client agrees on.
+    Mail clients won't load Inter and ignore most CSS, so everything here is
+    tables and inline styles — the one thing every client agrees on. The
+    site's look survives that: a yellow block with a thick black border, a
+    hard offset shadow (a black table peeking out behind), heavy type, and a
+    coloured stripe along the top of each card.
     """
-    rows = []
-    for it in items:
-        figure = it.get("figure") or ""
-        colour = it.get("colour") or "#1A1A1A"
+    FONT = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+    INK, YEL, RED = "#1A1A1A", "#FFD500", "#E3000B"
+    stripes = ["#00A3E0", "#FF8DC7", "#4CBB17", "#FF8A00", "#8C4DFF", "#FFD500"]
+
+    def shadowed(inner, bg="#ffffff", radius=18, pad=0):
+        # A hard offset shadow, built from two nested tables: the black one
+        # behind, shifted down and right, the coloured one in front.
+        return f"""
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate">
+  <tr><td style="padding:0 5px 5px 0;background:{INK};border-radius:{radius + 2}px">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+           style="background:{bg};border:3px solid {INK};border-radius:{radius}px;border-collapse:separate">
+      <tr><td style="padding:{pad}px">{inner}</td></tr>
+    </table>
+  </td></tr>
+</table>"""
+
+    cards = []
+    for n, it in enumerate(items):
+        stripe = it.get("colour") or stripes[n % len(stripes)]
         buy = it.get("buy_url")
-        button = (
-            f'<a href="{buy}" style="display:inline-block;background:#E3000B;color:#ffffff;'
-            f'font-weight:800;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:999px;'
-            f'border:2px solid #1A1A1A">Open the listing on eBay &rarr;</a>'
-        ) if buy else (
-            f'<a href="{site}/set/{it["set_num"]}" style="display:inline-block;background:#FFD500;color:#1A1A1A;'
-            f'font-weight:800;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:999px;'
-            f'border:2px solid #1A1A1A">See the set &rarr;</a>'
-        )
-        img = (f'<img src="{it["image_url"]}" width="96" height="96" alt="" '
-               f'style="display:block;border:2px solid #1A1A1A;border-radius:10px;background:#fff">'
-               ) if it.get("image_url") else ""
-        rows.append(f"""
-        <tr><td style="padding:0 0 12px">
-          <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
-                 style="border:3px solid #1A1A1A;border-radius:16px;background:#ffffff;border-top:8px solid {colour}">
-            <tr>
-              <td width="120" style="padding:14px 0 14px 14px;vertical-align:top">{img}</td>
-              <td style="padding:14px;vertical-align:top;font-family:Inter,Helvetica,Arial,sans-serif;color:#1A1A1A">
-                <div style="font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:{colour}">{figure}</div>
-                <div style="font-size:18px;font-weight:800;margin:4px 0 2px">{it["name"]}</div>
-                <div style="font-size:14px;font-weight:600;margin-bottom:12px">{it["detail"]}</div>
-                {button}
-              </td>
-            </tr>
-          </table>
-        </td></tr>""")
+        btn_bg, btn_fg, label = (RED, "#ffffff", "Open the listing on eBay &rarr;") if buy \
+            else (YEL, INK, "See the set &rarr;")
+        href = buy or f'{site}/set/{it["set_num"]}'
+        button = f"""
+<table cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate">
+  <tr><td style="padding:0 3px 3px 0;background:{INK};border-radius:999px">
+    <a href="{href}" style="display:inline-block;background:{btn_bg};color:{btn_fg};font-family:{FONT};
+       font-size:15px;font-weight:800;text-decoration:none;padding:12px 22px;border:2px solid {INK};
+       border-radius:999px">{label}</a>
+  </td></tr>
+</table>"""
+        photo = (f'<img src="{it["image_url"]}" width="112" height="112" alt="" '
+                 f'style="display:block;width:112px;height:112px;object-fit:contain;background:#ffffff;'
+                 f'border:2px solid {INK};border-radius:12px">') if it.get("image_url") else ""
+        body = f"""
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+  <tr><td height="10" style="background:{stripe};border-radius:15px 15px 0 0;font-size:0;line-height:0">&nbsp;</td></tr>
+  <tr><td style="padding:18px">
+    <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr>
+      {"<td width='128' valign='top' style='padding-right:16px'>" + photo + "</td>" if photo else ""}
+      <td valign="top" style="font-family:{FONT};color:{INK}">
+        <div style="display:inline-block;background:{YEL};border:2px solid {INK};border-radius:999px;
+             padding:4px 11px;font-size:12px;font-weight:900;letter-spacing:.06em;text-transform:uppercase">
+          {it.get("figure") or "Update"}</div>
+        <div style="font-size:21px;font-weight:900;line-height:1.2;letter-spacing:-.02em;margin:10px 0 6px">
+          {it["name"]}</div>
+        <div style="font-size:15px;font-weight:600;line-height:1.5;margin:0 0 16px">{it["detail"]}</div>
+        {button}
+      </td>
+    </tr></table>
+  </td></tr>
+</table>"""
+        cards.append(f'<tr><td style="padding:0 0 20px">{shadowed(body)}</td></tr>')
 
-    greeting = f"Hi {name}," if name else "Hi,"
-    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F6F6F4">
-<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#F6F6F4;padding:24px 12px">
-<tr><td align="center">
-  <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="max-width:560px;width:100%">
+    greeting = f"Hi {name}," if name else "Hi there,"
+    header = f"""
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr>
+  <td style="font-family:{FONT};color:{INK};padding:26px 28px">
+    <table cellpadding="0" cellspacing="0" role="presentation"><tr>
+      <td style="width:30px;height:30px;background:{YEL};border:3px solid {INK};border-radius:8px;
+          font-size:0;line-height:0">&nbsp;</td>
+      <td style="padding-left:10px;font-family:{FONT};font-size:19px;font-weight:900;letter-spacing:-.02em">
+        BrickMargin</td>
+    </tr></table>
+    <div style="font-size:30px;font-weight:900;line-height:1.1;letter-spacing:-.03em;margin:18px 0 8px">
+      {len(items)} update{"" if len(items) == 1 else "s"} on sets you watch</div>
+    <div style="font-size:16px;font-weight:600;line-height:1.5">{greeting} here is what moved since we last wrote.</div>
+  </td>
+</tr></table>"""
 
-    <tr><td style="padding:0 0 18px">
-      <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
-             style="background:#FFD500;border:3px solid #1A1A1A;border-radius:20px">
-        <tr><td style="padding:22px 24px;font-family:Inter,Helvetica,Arial,sans-serif;color:#1A1A1A">
-          <div style="font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase">BrickMargin</div>
-          <div style="font-size:24px;font-weight:900;line-height:1.15;margin-top:6px">
-            {len(items)} update{"" if len(items) == 1 else "s"} on sets you watch
-          </div>
-          <div style="font-size:14px;font-weight:600;margin-top:6px">{greeting} here is what moved.</div>
-        </td></tr>
-      </table>
-    </td></tr>
+    footer = f"""
+<tr><td style="padding:8px 4px 0;font-family:{FONT};color:{INK}">
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr><td align="center"
+      style="padding:18px 0;border-top:2px dashed #CFCFCB">
+    <a href="{site}/watchlist" style="color:{INK};font-weight:800;font-size:14px;text-decoration:underline">Your watchlist</a>
+    &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+    <a href="{site}/deals/mine" style="color:{INK};font-weight:800;font-size:14px;text-decoration:underline">Deals on your sets</a>
+    &nbsp;&nbsp;&middot;&nbsp;&nbsp;
+    <a href="{site}/settings" style="color:{INK};font-weight:600;font-size:14px;text-decoration:underline">Email settings</a>
+    <div style="margin-top:14px;font-size:12px;line-height:1.6;font-weight:600;color:#4A4A4A">
+      Every price includes shipping. eBay links are affiliate links &mdash; buying through them supports
+      BrickMargin at no cost to you, and never changes what we show.
+    </div>
+  </td></tr></table>
+</td></tr>"""
 
-    {"".join(rows)}
-
-    <tr><td style="padding:10px 4px 0;font-family:Inter,Helvetica,Arial,sans-serif;font-size:12px;color:#1A1A1A">
-      <a href="{site}/watchlist" style="color:#1A1A1A;font-weight:800">Your watchlist</a> &nbsp;&middot;&nbsp;
-      <a href="{site}/deals/mine" style="color:#1A1A1A;font-weight:800">All deals on your sets</a> &nbsp;&middot;&nbsp;
-      <a href="{site}/settings" style="color:#1A1A1A">Email settings</a>
-      <div style="margin-top:10px;color:#4A4A4A">
-        Prices include shipping. Links to eBay are affiliate links — buying through them supports the site
-        at no cost to you.
-      </div>
-    </td></tr>
-
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only"><title>BrickMargin</title></head>
+<body style="margin:0;padding:0;background:#F4F4F1">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#F4F4F1">
+<tr><td align="center" style="padding:28px 14px">
+  <table width="600" cellpadding="0" cellspacing="0" role="presentation" style="max-width:600px;width:100%">
+    <tr><td style="padding:0 0 26px">{shadowed(header, bg=YEL, radius=22)}</td></tr>
+    {"".join(cards)}
+    {footer}
   </table>
-</td></tr></table></body></html>"""
+</td></tr></table>
+</body></html>"""
 
 
 def log(msg):
@@ -207,59 +255,24 @@ def send_email(to, subject, html, text):
     return True
 
 
-def build_email(name, items):
+def build_email(name, items, values=None):
     """
-    Plain, quiet, and legible on a phone. No images, no marketing furniture —
-    somebody who asked to be told a price changed wants the price.
+    The email people receive.
+
+    This used to be a plain grey list with no pictures and no way to buy —
+    and a redesigned template sat beside it, never called. Now the text
+    version is kept for clients that want it, and the HTML is the site's own
+    look: photos, coloured cards, and a button straight to the listing.
     """
-    rows = []
+    values = values or {}
     lines = []
     for it in items:
-        rows.append(f"""
-        <tr>
-          <td style="padding:14px 0;border-bottom:1px solid #e4e4e0;">
-            <a href="{SITE_URL}/set/{it['set_num']}"
-               style="color:#0f1826;text-decoration:none;font-weight:700;font-size:16px;">
-              {it['name']}</a>
-            <div style="color:#4a4038;font-size:13px;margin-top:4px;">
-              {it['detail']}
-            </div>
-          </td>
-          <td align="right" style="padding:14px 0;border-bottom:1px solid #e4e4e0;
-              font-family:ui-monospace,Menlo,monospace;font-size:17px;
-              color:{it['colour']};white-space:nowrap;">
-            {it['figure']}
-          </td>
-        </tr>""")
+        it["image_url"] = photo_for(it, values)
         lines.append(f"- {it['name']}: {it['detail']} ({it['figure']})\n"
-                     f"  {SITE_URL}/set/{it['set_num']}")
-
-    html = f"""<!doctype html><html><body style="margin:0;padding:24px;
-background:#f8f4ec;font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;">
-<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e4e4e0;
-     border-radius:14px;padding:28px;">
-  <p style="margin:0 0 4px;font-size:11px;letter-spacing:.16em;text-transform:uppercase;
-     color:#6b5a48;font-weight:700;">BrickMargin</p>
-  <h1 style="margin:0 0 6px;font-size:22px;color:#0f1826;">
-    {len(items)} set{'s' if len(items) != 1 else ''} you're watching changed</h1>
-  <p style="margin:0 0 18px;color:#4a4038;font-size:14px;line-height:1.5;">
-    Measured from live listings. Values are median asking prices, so treat
-    them as a ceiling rather than a sale price.</p>
-  <table width="100%" cellpadding="0" cellspacing="0">{''.join(rows)}</table>
-  <p style="margin:22px 0 0;font-size:13px;">
-    <a href="{SITE_URL}/watchlist" style="color:#0b6b3a;font-weight:700;
-       text-decoration:none;">Open your watchlist &rarr;</a></p>
-  <p style="margin:20px 0 0;padding-top:16px;border-top:1px solid #e4e4e0;
-     color:#6b5a48;font-size:12px;line-height:1.5;">
-    You're getting this because you saved these sets on BrickMargin.
-    <a href="{SITE_URL}/settings" style="color:#6b5a48;">Turn alerts off</a>
-    any time. Independent price research; not affiliated with the LEGO Group.</p>
-</div></body></html>"""
-
-    text = (f"{len(items)} set(s) you're watching changed\n\n"
-            + "\n".join(lines)
-            + f"\n\nYour watchlist: {SITE_URL}/watchlist"
-              f"\nTurn alerts off: {SITE_URL}/settings\n")
+                     f"  {it.get('buy_url') or SITE_URL + '/set/' + it['set_num']}")
+    html = build_html(name, items, site=SITE_URL)
+    text = (f"Hi {name or 'there'},\n\n" + "\n\n".join(lines) +
+            f"\n\nYour watchlist: {SITE_URL}/watchlist\nEmail settings: {SITE_URL}/settings\n")
     return html, text
 
 
@@ -320,11 +333,11 @@ def main():
     log(f"  {len(watches)} watches · {len(user_ids)} people · {len(set_nums)} sets")
 
     profiles = {p["id"]: p for p in (client.table("profiles")
-                .select("id,email,alert_email,alert_price,alert_discount,alert_drop_pct,notify_all")
+                .select("id,email,username,alert_email,alert_price,alert_discount,alert_drop_pct,notify_all")
                 .in_("id", user_ids).execute()).data or []}
 
     values = {v["set_num"]: v for v in (client.table("set_values")
-              .select("set_num,name,market_value,comp_count,msrp")
+              .select("set_num,name,market_value,comp_count,msrp,catalog_image")
               .in_("set_num", set_nums).execute()).data or []}
 
     retiring = {}
@@ -479,7 +492,8 @@ def main():
         subject = (f"{items[0]['name']} {items[0]['figure']}"
                    if len(items) == 1
                    else f"{len(items)} sets you're watching changed")
-        html, text = build_email(prof.get("email"), items)
+        who = (prof.get("username") or "").strip() or None
+        html, text = build_email(who, items, values)
 
         if PROBE:
             log(f"  WOULD SEND to {email}: {subject}")
