@@ -51,7 +51,7 @@ HTTP.mount("https://", HTTPAdapter(
 ))
 from supabase import create_client
 
-VERSION = "3.1-resilient"
+VERSION = "3.2-catalogueimg"
 
 def require(n):
     v = os.environ.get(n, "").strip()
@@ -161,7 +161,8 @@ def catalog(client):
                 row = figs.setdefault(fig, {
                     "fig_num": fig, "bl_num": fig, "name": it.get("name", fig),
                     "theme": st.get("theme"), "year_released": st.get("year_released"),
-                    "image_url": f"https://img.bricklink.com/ItemImage/MN/0/{fig}.png",
+                    # /ML/ is the catalogue path, served to any site; /ItemImage/ refuses.
+                    "image_url": f"https://img.bricklink.com/ML/{fig}.jpg",
                     "in_sets": set(),
                 })
                 row["in_sets"].add(st["set_num"])
