@@ -64,7 +64,7 @@ HTTP.mount("https://", HTTPAdapter(
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "4.3-bags"
+VERSION = "4.4-fromset"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -380,6 +380,14 @@ PART_PATTERNS = (
     # but it is one bag out of a set, not the set. "Bag #4", "bags 1-3",
     # "sealed bag 2". This is the gap the Carnotaurus listing walked through.
     r"\bbags?\s*#?\s*\d+\b",
+    # "Moff Gideon w/ Darksaber from 75456" — a single figure lifted out of a
+    # set. "for <number>" was already caught; "from" and "out of" were not,
+    # and they are the commoner phrasings.
+    r"\b(from|out\s+of|off\s+of)\s+(lego\s+)?(set\s+)?#?\s*\d{4,7}\b",
+    r"\bsplit\s+from\b",
+    # a figure named with its accessories and no set is a figure, not a set
+    r"\bw\/?\s*(darksaber|lightsaber|helmet|blaster|cape|weapon)s?\b",
+    r"\b(minifig|minifigure|figure|fig)\s+(from|only|w/|with)\b",
     r"\bbags?\s*\d+\s*(-|to|&|and)\s*\d+\b",
     r"\b(sealed|inner|numbered)\s+bags?\b",
     r"\bpart\s+\d+\s+of\s+\d+\b",
