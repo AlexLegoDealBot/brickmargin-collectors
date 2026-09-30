@@ -24,6 +24,9 @@ RESEND = os.environ.get("RESEND_API_KEY", "").strip()
 FROM = os.environ.get("FROM_EMAIL") or "BrickMargin <alerts@brickmargin.com>"
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
 SITE = "https://www.brickmargin.com"
+MAILING_ADDRESS = (os.environ.get("MAILING_ADDRESS") or "").strip()
+if not MAILING_ADDRESS and not PROBE:
+    sys.exit("ERROR: MAILING_ADDRESS is not set — CAN-SPAM requires a postal address in every email.")
 if not (SB and KEY): sys.exit("ERROR: SUPABASE_URL and SUPABASE_SERVICE_KEY required")
 CAMPAIGN = os.environ.get("EBAY_CAMPAIGN_ID", "5339178457").strip()
 
@@ -51,7 +54,7 @@ by_user = {}
 for w in watches: by_user.setdefault(w["user_id"], set()).add(w["set_num"])
 log(f"{len(by_user)} people with watchlists")
 
-profiles = {p["id"]: p for p in ((client.table("profiles").select("id,notify_all").execute()).data or [])}
+profiles = {p["id"]: p for p in ((client.table("profiles").select("id,notify_all,email_opt_in,unsub_token").execute()).data or [])}
 nums = sorted({n for s in by_user.values() for n in s})
 vals = {v["set_num"]: v for v in ((client.table("set_values")
         .select("set_num,name,market_value,msrp,comp_count,sold_new,retired_at").in_("set_num", nums).execute()).data or [])}
@@ -67,6 +70,8 @@ sent = 0
 for uid, sets in by_user.items():
     prof = profiles.get(uid) or {}
     if prof.get("notify_all") is False: continue
+    if not prof.get("email_opt_in"): continue          # consent is the gate
+    unsub = f"{SITE}/unsubscribe?t={prof.get('unsub_token')}"
     u = client.auth.admin.get_user_by_id(uid)
     email = getattr(getattr(u, "user", None), "email", None)
     if not email: continue
@@ -87,11 +92,17 @@ for uid, sets in by_user.items():
 <div style="font-size:24px;font-weight:900;margin-top:6px">{len(rows)} watched set{"s" if len(rows)!=1 else ""}, checked every day.</div></div>
 <table style="width:100%;border-collapse:collapse">{''.join(rows)}</table>
 <p style="font-size:13px;margin-top:22px"><a href="{SITE}/watchlist" style="color:#1A1A1A;font-weight:700">Open your watchlist</a> &nbsp;·&nbsp;
-<a href="{SITE}/settings" style="color:#1A1A1A">Email settings</a></p></div>'''
+<a href="{SITE}/settings" style="color:#1A1A1A">Email settings</a></p>
+<p style="font-size:12px;line-height:1.6;margin-top:14px">eBay links are affiliate links &mdash; if you buy after clicking,
+BrickMargin may earn a commission at no cost to you.</p>
+<p style="font-size:12px;line-height:1.6">You're getting this because you turned on email alerts at brickmargin.com.
+<a href="{unsub}" style="color:#1A1A1A;font-weight:700">Unsubscribe with one click</a>.<br>BrickMargin &middot; {MAILING_ADDRESS}</p></div>'''
     if PROBE:
         log(f"  would send to {email}: {len(rows)} sets"); sent += 1; continue
     r = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND}"},
-                      json={"from": FROM, "to": [email], "subject": f"Your {len(rows)} watched sets this week", "html": html}, timeout=30)
+                      json={"from": FROM, "to": [email], "subject": f"Your {len(rows)} watched sets this week", "html": html,
+                            "headers": {"List-Unsubscribe": f"<{unsub.replace('/unsubscribe?', '/api/unsubscribe?')}>",
+                                        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}}, timeout=30)
     if r.status_code < 300: sent += 1
     else: log(f"  {email}: HTTP {r.status_code} {r.text[:80]}")
 log(f"{'would send' if PROBE else 'sent'} {sent} digests")

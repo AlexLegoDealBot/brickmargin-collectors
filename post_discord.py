@@ -100,7 +100,7 @@ for d in fresh:
             {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin]({SITE}/set/{d['set_num']})", "inline": True},
             {"name": "Seller", "value": f"{d.get('seller') or '—'}", "inline": True},
         ],
-        "footer": {"text": "BrickMargin · every price includes shipping · tap the title to buy",
+        "footer": {"text": "Affiliate link: BrickMargin may earn a commission if you buy · price includes shipping",
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "2.1-sitelook"
+VERSION = "2.2-consent"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -99,7 +99,7 @@ def photo_for(item, values):
     return v.get("catalog_image") or None
 
 
-def build_html(name, items, site="https://www.brickmargin.com"):
+def build_html(name, items, site="https://www.brickmargin.com", unsub_url=None):
     """
     An email that looks like the site it came from.
 
@@ -190,8 +190,15 @@ def build_html(name, items, site="https://www.brickmargin.com"):
     &nbsp;&nbsp;&middot;&nbsp;&nbsp;
     <a href="{site}/settings" style="color:{INK};font-weight:600;font-size:14px;text-decoration:underline">Email settings</a>
     <div style="margin-top:14px;font-size:12px;line-height:1.6;font-weight:600;color:#4A4A4A">
-      Every price includes shipping. eBay links are affiliate links &mdash; buying through them supports
-      BrickMargin at no cost to you, and never changes what we show.
+      Every price includes shipping. eBay links are affiliate links &mdash; if you buy after clicking,
+      BrickMargin may earn a commission at no cost to you. It never changes what we show.
+    </div>
+    <div style="margin-top:14px;font-size:12px;line-height:1.6;font-weight:600;color:#4A4A4A">
+      You're getting this because you turned on email alerts at brickmargin.com.
+      <a href="{unsub_url or site + '/settings'}" style="color:#1A1A1A;font-weight:800;text-decoration:underline">Unsubscribe with one click</a>.
+    </div>
+    <div style="margin-top:10px;font-size:12px;line-height:1.6;font-weight:600;color:#4A4A4A">
+      BrickMargin &middot; {MAILING_ADDRESS}
     </div>
   </td></tr></table>
 </td></tr>"""
@@ -240,13 +247,25 @@ def as_utc(value):
     return dt
 
 
-def send_email(to, subject, html, text):
+# CAN-SPAM requires a valid physical postal address in every commercial
+# email. It lives in a secret rather than the code, and if it is missing the
+# sender refuses to send anything at all: a non-compliant email is worse than
+# no email.
+MAILING_ADDRESS = (os.environ.get("MAILING_ADDRESS") or "").strip()
+
+
+def send_email(to, subject, html, text, unsub_url=None):
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_KEY}",
                  "Content-Type": "application/json"},
         json={"from": ALERT_FROM, "to": [to], "subject": subject,
-              "html": html, "text": text},
+              "html": html, "text": text,
+              # RFC 8058: mail apps show their own Unsubscribe button and
+              # one tap unsubscribes, with no page to visit at all.
+              **({"headers": {
+                  "List-Unsubscribe": f"<{unsub_url.replace('/unsubscribe?', '/api/unsubscribe?')}>",
+                  "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"}} if unsub_url else {})},
         timeout=30,
     )
     if resp.status_code >= 300:
@@ -255,7 +274,7 @@ def send_email(to, subject, html, text):
     return True
 
 
-def build_email(name, items, values=None):
+def build_email(name, items, values=None, unsub_url=None):
     """
     The email people receive.
 
@@ -270,9 +289,12 @@ def build_email(name, items, values=None):
         it["image_url"] = photo_for(it, values)
         lines.append(f"- {it['name']}: {it['detail']} ({it['figure']})\n"
                      f"  {it.get('buy_url') or SITE_URL + '/set/' + it['set_num']}")
-    html = build_html(name, items, site=SITE_URL)
+    html = build_html(name, items, site=SITE_URL, unsub_url=unsub_url)
     text = (f"Hi {name or 'there'},\n\n" + "\n\n".join(lines) +
-            f"\n\nYour watchlist: {SITE_URL}/watchlist\nEmail settings: {SITE_URL}/settings\n")
+            f"\n\nYour watchlist: {SITE_URL}/watchlist\n"
+            f"Unsubscribe: {unsub_url or SITE_URL + '/settings'}\n\n"
+            "eBay links are affiliate links; BrickMargin may earn a commission at no cost to you.\n"
+            f"BrickMargin · {MAILING_ADDRESS}\n")
     return html, text
 
 
@@ -308,6 +330,9 @@ def preflight(client):
 
 
 def main():
+    if not MAILING_ADDRESS and not PROBE:
+        sys.exit("ERROR: MAILING_ADDRESS is not set. CAN-SPAM requires a postal address in every "
+                 "commercial email, so nothing will be sent until it is. Add it as a repository secret.")
     log(f"BrickMargin alert sender — version {VERSION}  probe={PROBE}")
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -333,7 +358,7 @@ def main():
     log(f"  {len(watches)} watches · {len(user_ids)} people · {len(set_nums)} sets")
 
     profiles = {p["id"]: p for p in (client.table("profiles")
-                .select("id,email,username,alert_email,alert_price,alert_discount,alert_drop_pct,notify_all")
+                .select("id,email,username,alert_email,alert_price,alert_discount,alert_drop_pct,notify_all,email_opt_in,unsub_token")
                 .in_("id", user_ids).execute()).data or []}
 
     values = {v["set_num"]: v for v in (client.table("set_values")
@@ -383,6 +408,9 @@ def main():
             continue
         prof = profiles.get(w["user_id"]) or {}
         if prof.get("notify_all") is False:
+            continue
+        # Consent is the gate. Nobody is emailed who hasn't ticked the box.
+        if not prof.get("email_opt_in"):
             continue
         by_user.setdefault(w["user_id"], []).append(w["set_num"])
 
@@ -493,14 +521,15 @@ def main():
                    if len(items) == 1
                    else f"{len(items)} sets you're watching changed")
         who = (prof.get("username") or "").strip() or None
-        html, text = build_email(who, items, values)
+        unsub = f"{SITE_URL}/unsubscribe?t={prof.get('unsub_token')}" if prof.get("unsub_token") else None
+        html, text = build_email(who, items, values, unsub)
 
         if PROBE:
             log(f"  WOULD SEND to {email}: {subject}")
             for it in items:
                 log(f"      {it['name']} — {it['detail']} ({it['figure']})")
         else:
-            if send_email(email, subject, html, text):
+            if send_email(email, subject, html, text, unsub):
                 emails += 1
                 log(f"  sent to {email}: {subject}")
 

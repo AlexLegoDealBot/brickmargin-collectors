@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.7-sealedonly"
+VERSION = "1.8-disclosed"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -162,7 +162,7 @@ def announce(d, client):
             {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin](https://www.brickmargin.com/set/{d['set_num']})", "inline": True},
             {"name": "Seller", "value": d.get("seller") or "—", "inline": True},
         ],
-        "footer": {"text": "BrickMargin · price includes shipping · tap the title to buy",
+        "footer": {"text": "Affiliate link: BrickMargin may earn a commission if you buy · price includes shipping",
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
