@@ -55,6 +55,8 @@ jobs:
           EVERY: ${{ github.event.inputs.every || '90' }}
           DISCORD_WEBHOOK_RETAIL: ${{ secrets.DISCORD_WEBHOOK_RETAIL }}
           DISCORD_WEBHOOK_MARKET: ${{ secrets.DISCORD_WEBHOOK_MARKET }}
+          DISCORD_WEBHOOK_BEST: ${{ secrets.DISCORD_WEBHOOK_BEST }}
+          DISCORD_BEST_ROLE_ID: ${{ secrets.DISCORD_BEST_ROLE_ID }}
           EBAY_CAMPAIGN_ID: '5339178457'
           MIN_POST_SCORE: '4.0'
         run: python watch_new.py
