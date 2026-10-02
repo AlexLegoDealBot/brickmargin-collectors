@@ -21,6 +21,28 @@ SB = os.environ.get("SUPABASE_URL", "").strip(); KEY = os.environ.get("SUPABASE_
 HOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
 HOOK_RETAIL = (os.environ.get("DISCORD_WEBHOOK_RETAIL") or "").strip() or HOOK
 HOOK_MARKET = (os.environ.get("DISCORD_WEBHOOK_MARKET") or "").strip() or HOOK
+
+# #best-deals — the same rule as the fast lane, so the two never disagree:
+# 30%+ off with $60+ saved, or 20%+ off with $150+ saved. ~9 a day.
+HOOK_BEST = (os.environ.get("DISCORD_WEBHOOK_BEST") or "").strip()
+BEST_MIN_PCT = float(os.environ.get("BEST_MIN_PCT") or 30)
+BEST_MIN_SAVING = float(os.environ.get("BEST_MIN_SAVING") or 60)
+BEST_BIG_SAVING = float(os.environ.get("BEST_BIG_SAVING") or 150)
+BEST_BIG_MIN_PCT = float(os.environ.get("BEST_BIG_MIN_PCT") or 20)
+BEST_DAILY_CAP = int(os.environ.get("BEST_DAILY_CAP") or 15)
+BEST_ROLE_ID = (os.environ.get("DISCORD_BEST_ROLE_ID") or "").strip()
+
+
+def saving_of(d):
+    ref = d.get("msrp") if d.get("deal_type") == "retail" and d.get("msrp") else d.get("market_value")
+    return float(ref or 0) - float(d.get("total_price") or 0)
+
+
+def is_best(d):
+    pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
+    save = saving_of(d)
+    return ((pct >= BEST_MIN_PCT and save >= BEST_MIN_SAVING)
+            or (pct >= BEST_BIG_MIN_PCT and save >= BEST_BIG_SAVING))
 MIN_SCORE = float(os.environ.get("MIN_SCORE") or 5.0)
 MAX_POSTS = int(os.environ.get("MAX_POSTS") or 8)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
@@ -115,6 +137,24 @@ for d in fresh:
     if r.status_code < 300:
         client.table("discord_posts").insert({"item_id": d["item_id"], "set_num": d["set_num"]}).execute()
         sent += 1; time.sleep(1.2)          # Discord rate limits webhooks
+
+        if HOOK_BEST and is_best(d):
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
+            used = (client.table("discord_posts").select("item_id", count="exact")
+                    .gte("best_at", today).execute()).count or 0
+            if used < BEST_DAILY_CAP:
+                best = {**embed, "author": {**embed.get("author", {}),
+                        "name": "🏆 Best deal · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
+                payload = {"embeds": [best], "username": "BrickMargin",
+                           "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
+                if BEST_ROLE_ID:
+                    payload["content"] = f"<@&{BEST_ROLE_ID}>"
+                    payload["allowed_mentions"] = {"parse": [], "roles": [BEST_ROLE_ID]}
+                if requests.post(HOOK_BEST, json=payload, timeout=20).status_code < 300:
+                    client.table("discord_posts").update({"best_at": datetime.now(timezone.utc).isoformat()}) \
+                        .eq("item_id", d["item_id"]).execute()
+                    log(f"  🏆 best deal: {d.get('set_name') or d['set_num']} saves ${saving_of(d):,.0f}")
+                    time.sleep(1.2)
     else:
         log(f"  HTTP {r.status_code} {r.text[:120]}")
 log(f"{'would post' if PROBE else 'posted'} {sent}")

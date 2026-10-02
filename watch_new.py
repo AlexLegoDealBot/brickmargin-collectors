@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "1.8-disclosed"
+VERSION = "1.9-bestdeals"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -54,6 +54,21 @@ HOOK_RETAIL = (os.environ.get("DISCORD_WEBHOOK_RETAIL") or "").strip() or HOOK
 HOOK_MARKET = (os.environ.get("DISCORD_WEBHOOK_MARKET") or "").strip() or HOOK
 CAMPAIGN = (os.environ.get("EBAY_CAMPAIGN_ID") or "5339178457").strip()
 MIN_POST_SCORE = float(os.environ.get("MIN_POST_SCORE") or 4.0)
+
+# #best-deals: the handful a day worth a notification. A score alone runs
+# generous — 30% off a $20 set scores like 30% off a $400 one — so "best"
+# means a big percentage AND real money: at least 30% off and at least $60
+# saved. Measured on a week of real deals, that is about nine a day,
+# averaging 42% off and $126 saved. The ceiling is a safety net.
+HOOK_BEST = (os.environ.get("DISCORD_WEBHOOK_BEST") or "").strip()
+BEST_MIN_PCT = float(os.environ.get("BEST_MIN_PCT") or 30)
+BEST_MIN_SAVING = float(os.environ.get("BEST_MIN_SAVING") or 60)
+BEST_DAILY_CAP = int(os.environ.get("BEST_DAILY_CAP") or 15)
+# ...or very big money at a decent percentage: $238 off a UCS Falcon at 28%
+# is exactly the deal people want pinged about, and a flat 30% rule missed it.
+BEST_BIG_SAVING = float(os.environ.get("BEST_BIG_SAVING") or 150)
+BEST_BIG_MIN_PCT = float(os.environ.get("BEST_BIG_MIN_PCT") or 20)
+BEST_ROLE_ID = (os.environ.get("DISCORD_BEST_ROLE_ID") or "").strip()   # optional: ping a role
 
 def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${float(n):,.2f}"
@@ -110,6 +125,30 @@ def big_image(url: str) -> str:
     if not url:
         return url
     return re.sub(r"/s-l\d+\.", "/s-l1600.", url)
+
+
+def saving_of(d):
+    """What the post itself claims you save: off retail for a shop-price
+    deal, off resale value for a retired one."""
+    ref = d.get("msrp") if d.get("deal_type") == "retail" and d.get("msrp") else d.get("market_value")
+    return float(ref or 0) - float(d.get("total_price") or 0)
+
+
+def is_best(d):
+    pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
+    save = saving_of(d)
+    return ((pct >= BEST_MIN_PCT and save >= BEST_MIN_SAVING)
+            or (pct >= BEST_BIG_MIN_PCT and save >= BEST_BIG_SAVING))
+
+
+def best_room_has_space(client):
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
+    try:
+        n = (client.table("discord_posts").select("item_id", count="exact")
+             .gte("best_at", today).execute()).count or 0
+        return n < BEST_DAILY_CAP
+    except Exception:
+        return False
 
 
 def announce(d, client):
@@ -174,6 +213,24 @@ def announce(d, client):
             client.table("discord_posts").upsert(
                 {"item_id": d["item_id"], "set_num": d["set_num"]}, on_conflict="item_id").execute()
             time.sleep(1.2)          # Discord rate-limits webhooks
+
+            if HOOK_BEST and is_best(d) and best_room_has_space(client):
+                best = {**embed, "author": {**embed["author"],
+                        "name": "🏆 Best deal · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
+                payload = {"embeds": [best], "username": "BrickMargin",
+                           "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
+                if BEST_ROLE_ID:
+                    # mention only that role — never @everyone, never anyone else
+                    payload["content"] = f"<@&{BEST_ROLE_ID}>"
+                    payload["allowed_mentions"] = {"parse": [], "roles": [BEST_ROLE_ID]}
+                rb = HTTP.post(HOOK_BEST, json=payload, timeout=20)
+                if rb.status_code < 300:
+                    client.table("discord_posts").update(
+                        {"best_at": datetime.now(timezone.utc).isoformat()}).eq("item_id", d["item_id"]).execute()
+                    log(f"    🏆 also posted to #best-deals (saves ${saving_of(d):,.0f})")
+                    time.sleep(1.2)
+                else:
+                    log(f"    best-deals HTTP {rb.status_code}")
         else:
             log(f"    discord HTTP {r.status_code}")
     except Exception as exc:
@@ -183,7 +240,7 @@ def announce(d, client):
 def main():
     log(f"BrickMargin fast lane — version {VERSION}  probe={PROBE}  {MINUTES}m at {EVERY}s")
     log(f"  discord: retail={'set' if HOOK_RETAIL else 'MISSING'} · "
-        f"resale={'set' if HOOK_MARKET else 'MISSING'} · post score >= {MIN_POST_SCORE}")
+        f"resale={'set' if HOOK_MARKET else 'MISSING'} · best={'set' if HOOK_BEST else 'off'} · post score >= {MIN_POST_SCORE}")
     client = create_client(SB_URL, SB_KEY)
 
     # The catalogue, once, in memory. A set number appearing in a title is
