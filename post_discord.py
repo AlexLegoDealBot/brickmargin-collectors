@@ -131,11 +131,12 @@ for d in fresh:
         saving = f"About **{usd(float(d['market_value']) - float(d['total_price']))}** under what it resells for"
 
     embed = {
-        "author": {"name": f"{band} · " + ("under retail" if d.get("deal_type") == "retail" else "under resale"),
+        # EPN: every eBay link says it goes to eBay — author line, title, labelled link
+        "author": {"name": f"eBay listing · {band} · " + ("under retail" if d.get("deal_type") == "retail" else "under resale"),
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
-        "title": f"{d['set_name']}",
+        "title": f"{d['set_name']} — View on eBay"[:256],
         "url": affiliate(d["item_url"]),
-        "description": f"## {usd(d['total_price'])}  ·  {off}\n{saving}",
+        "description": f"**[Buy on eBay →]({affiliate(d['item_url'])})**\n## {usd(d['total_price'])}  ·  {off}\n{saving}",
         "color": colour,
         "image": {"url": re.sub(r"/s-l\d+\.", "/s-l1600.", d["image_url"])} if d.get("image_url") else None,
         "fields": [
@@ -146,7 +147,7 @@ for d in fresh:
             {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin]({SITE}/set/{d['set_num']})", "inline": True},
             {"name": "Seller", "value": f"{d.get('seller') or '—'}", "inline": True},
         ],
-        "footer": {"text": "Affiliate link: BrickMargin may earn a commission if you buy · price includes shipping",
+        "footer": {"text": "Affiliate link to eBay: BrickMargin may earn a commission if you buy · price includes shipping",
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -173,7 +174,7 @@ for d in fresh:
                     .gte("best_at", today).execute()).count or 0
             if used < BEST_DAILY_CAP:
                 best = {**embed, "author": {**embed.get("author", {}),
-                        "name": "🏆 Best deal · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
+                        "name": "🏆 Best deal · eBay listing · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
                 payload = {"embeds": [best], "username": "BrickMargin",
                            "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
                 if BEST_ROLE_ID:

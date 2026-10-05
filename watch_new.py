@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.0-themeroles"
+VERSION = "2.1-ebaylabels"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -206,11 +206,14 @@ def announce(d, client):
     off = (f"{pct:.0f}% under retail" if d.get("deal_type") == "retail" else f"{pct:.0f}% under market")
 
     embed = {
-        "author": {"name": f"{band} · " + ("under retail — buy it" if d.get("deal_type") == "retail" else "under resale — flip it"),
+        # EPN requires every eBay link to say it goes to eBay. It does, three
+        # times: the author line, the clickable title, and a labelled link.
+        "author": {"name": f"eBay listing · {band} · " + ("under retail" if d.get("deal_type") == "retail" else "under resale"),
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
-        "title": (d.get("set_name") or d["title"])[:240],
+        "title": ((d.get("set_name") or d["title"])[:200] + " — View on eBay"),
         "url": affiliate(d["item_url"]),
         "description": (
+            f"**[Buy on eBay →]({affiliate(d['item_url'])})**\n"
             f"## {usd(d['total_price'])}  ·  {off}\n"
             f"{saving}\n\n"
             f"*{d['title'][:140]}*"
@@ -225,7 +228,7 @@ def announce(d, client):
             {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin](https://www.brickmargin.com/set/{d['set_num']})", "inline": True},
             {"name": "Seller", "value": d.get("seller") or "—", "inline": True},
         ],
-        "footer": {"text": "Affiliate link: BrickMargin may earn a commission if you buy · price includes shipping",
+        "footer": {"text": "Affiliate link to eBay: BrickMargin may earn a commission if you buy · price includes shipping",
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -245,7 +248,7 @@ def announce(d, client):
 
             if HOOK_BEST and is_best(d) and best_room_has_space(client):
                 best = {**embed, "author": {**embed["author"],
-                        "name": "🏆 Best deal · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
+                        "name": "🏆 Best deal · eBay listing · " + ("under retail" if d.get("deal_type") == "retail" else "under resale")}}
                 payload = {"embeds": [best], "username": "BrickMargin",
                            "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
                 if BEST_ROLE_ID:
