@@ -70,6 +70,7 @@ jobs:
           DISCORD_WEBHOOK_MARKET: ${{ secrets.DISCORD_WEBHOOK_MARKET }}
           DISCORD_WEBHOOK_BEST: ${{ secrets.DISCORD_WEBHOOK_BEST }}
           DISCORD_BEST_ROLE_ID: ${{ secrets.DISCORD_BEST_ROLE_ID }}
+          DISCORD_THEME_ROLES: ${{ secrets.DISCORD_THEME_ROLES }}
           EBAY_CAMPAIGN_ID: '5339178457'
           PROBE: 'false'
           MIN_SCORE: '5.0'

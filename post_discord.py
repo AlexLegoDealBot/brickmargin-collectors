@@ -43,6 +43,30 @@ def is_best(d):
     save = saving_of(d)
     return ((pct >= BEST_MIN_PCT and save >= BEST_MIN_SAVING)
             or (pct >= BEST_BIG_MIN_PCT and save >= BEST_BIG_SAVING))
+
+# Theme roles. Members pick the themes they collect when they join, and get
+# pinged when a deal in one of them is at least 25% off and saves $25 or more.
+# Measured on a month of real deals that's ~4–5 pings a day for Star Wars,
+# 2–3 for Disney or Icons, about one or fewer for the rest — useful, not
+# mutable. The secret is JSON mapping our theme names to Discord role IDs:
+#   {"Star Wars": "1234...", "Icons": "5678...", ...}
+import json as _json
+try:
+    THEME_ROLES = {k: str(v) for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if v}
+except Exception:
+    THEME_ROLES = {}
+THEME_MIN_PCT = float(os.environ.get("THEME_MIN_PCT") or 25)
+THEME_MIN_SAVING = float(os.environ.get("THEME_MIN_SAVING") or 25)
+
+
+def theme_ping(d):
+    """The role to ping for this deal, or None. Never more than one role."""
+    role = THEME_ROLES.get(d.get("theme") or "")
+    if not role:
+        return None
+    pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
+    return role if (pct >= THEME_MIN_PCT and saving_of(d) >= THEME_MIN_SAVING) or is_best(d) else None
+
 MIN_SCORE = float(os.environ.get("MIN_SCORE") or 5.0)
 MAX_POSTS = int(os.environ.get("MAX_POSTS") or 8)
 PROBE = os.environ.get("PROBE", "true").strip().lower() != "false"
@@ -132,8 +156,13 @@ for d in fresh:
     target = HOOK_RETAIL if d.get("deal_type") == "retail" else HOOK_MARKET
     if not target:
         continue
-    r = requests.post(target, json={"embeds": [embed], "username": "BrickMargin",
-                                  "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}, timeout=20)
+    main = {"embeds": [embed], "username": "BrickMargin",
+            "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
+    role = theme_ping(d)
+    if role:
+        main["content"] = f"<@&{role}>"
+        main["allowed_mentions"] = {"parse": [], "roles": [role]}
+    r = requests.post(target, json=main, timeout=20)
     if r.status_code < 300:
         client.table("discord_posts").insert({"item_id": d["item_id"], "set_num": d["set_num"]}).execute()
         sent += 1; time.sleep(1.2)          # Discord rate limits webhooks
