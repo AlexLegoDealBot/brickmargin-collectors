@@ -15,6 +15,8 @@ Environment: SUPABASE_URL, SUPABASE_SERVICE_KEY, DISCORD_WEBHOOK
 import os, sys, time
 from datetime import datetime, timezone
 import requests
+
+VERSION = "2.6-totals"   # check this line after pasting
 from supabase import create_client
 
 SB = os.environ.get("SUPABASE_URL", "").strip(); KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
@@ -147,7 +149,7 @@ for d in fresh:
             {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin]({SITE}/set/{d['set_num']})", "inline": True},
             {"name": "Seller", "value": f"{d.get('seller') or '—'}", "inline": True},
         ],
-        "footer": {"text": "Affiliate link to eBay: BrickMargin may earn a commission if you buy · price includes shipping",
+        "footer": {"text": "Affiliate link to eBay: BrickMargin may earn a commission if you buy",
                    "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

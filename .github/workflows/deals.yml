@@ -31,7 +31,10 @@ on:
         description: 'How many sets to scan'
         default: '1200'
   schedule:
-    - cron: '0 2,6,10,14,18,22 * * *'
+    # Once a day (was six) — the fast lane catches new listings within a
+    # minute; this sweep is for older ones. Restore '0 2,6,10,14,18,22 * * *'
+    # and MAX_SETS 1200 once the 100k limit is approved.
+    - cron: '0 10 * * *'
 
 jobs:
   collect:
@@ -57,7 +60,7 @@ jobs:
           MIN_FEEDBACK: ${{ github.event.inputs.min_feedback || '95' }}
           MIN_FEEDBACK_COUNT: ${{ github.event.inputs.min_feedback_count || '15' }}
           EXCLUDE_RETIRED: ${{ github.event.inputs.exclude_retired || 'true' }}
-          MAX_SETS: ${{ github.event.inputs.max_sets || '1200' }}
+          MAX_SETS: ${{ github.event.inputs.max_sets || '800' }}
         run: python collect_deals.py
       - name: Post new deals to Discord
         if: github.event.inputs.probe != 'true'

@@ -64,7 +64,7 @@ HTTP.mount("https://", HTTPAdapter(
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "4.4-fromset"
+VERSION = "4.5-advent"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -312,6 +312,22 @@ def name_tokens(name, theme=None):
             if len(w) >= 4 and w not in NAME_STOP and w not in theme_words]
 
 
+# A single day from an advent calendar is not the calendar. Sellers break
+# them up and list each day on its own — "New (Single) *DAY 14* Weapon Rack
+# Lego Advent Calendar ... 75307" — and the full set's number in the title
+# made them look like the whole calendar at a steal.
+ADVENT_PIECE = (
+    r"\bday\s*#?\s*\d{1,2}\b", r"\bdoor\s*#?\s*\d{1,2}\b",
+    r"\b\d{1,2}(st|nd|rd|th)\s+(day|door)\b",
+    r"\b(single|individual)\b", r"\bmini\s*-?\s*builds?\s+only\b",
+)
+
+
+def is_advent_piece(title):
+    t = (title or "").lower()
+    return "advent" in t and any(re.search(p, t) for p in ADVENT_PIECE)
+
+
 def is_relevant(title, num, set_name=None, theme=None):
     """
     The listing must plausibly BE the set.
@@ -324,6 +340,8 @@ def is_relevant(title, num, set_name=None, theme=None):
     """
     t = (title or "").lower()
 
+    if is_advent_piece(t):
+        return False, "a single day from an advent calendar, not the calendar"
     if "lego" not in t:
         return False, "not lego"
 

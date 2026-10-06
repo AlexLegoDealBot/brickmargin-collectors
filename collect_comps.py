@@ -70,7 +70,7 @@ HTTP.mount("https://", HTTPAdapter(
 from supabase import create_client
 
 # Bump on every edit. Prints in the log so you can confirm which version ran.
-VERSION = "2.6-resilient"
+VERSION = "2.7-advent"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -304,6 +304,19 @@ def looks_like_parts(title):
     return any(re.search(p, t) for p in PART_SHAPES)
 
 
+ADVENT_PIECE = (
+    r"\bday\s*#?\s*\d{1,2}\b", r"\bdoor\s*#?\s*\d{1,2}\b",
+    r"\b\d{1,2}(st|nd|rd|th)\s+(day|door)\b",
+    r"\b(single|individual)\b", r"\bmini\s*-?\s*builds?\s+only\b",
+)
+
+
+def is_advent_piece(title):
+    """A single day sold out of an advent calendar is not the calendar."""
+    t = (title or "").lower()
+    return "advent" in t and any(re.search(p, t) for p in ADVENT_PIECE)
+
+
 def is_relevant(title, num, set_name=None, theme=None):
     """
     Gates, in order. Returns (keep: bool, reason: str) so the probe output can
@@ -320,6 +333,8 @@ def is_relevant(title, num, set_name=None, theme=None):
       5. If STRICT_SEALED, the title must positively assert sealed condition.
     """
     low = title.lower()
+    if is_advent_piece(low):
+        return False, "advent calendar day, not the calendar"
 
     if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", low):
         return False, "wrong set"

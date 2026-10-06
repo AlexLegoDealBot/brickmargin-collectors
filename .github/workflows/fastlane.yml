@@ -14,14 +14,17 @@ on:
   workflow_dispatch:
     inputs:
       probe: { type: boolean, default: false }
-      minutes: { default: '25' }
-      every: { default: '90' }
+      minutes: { default: '50' }
+      every: { default: '35' }
       chain:
         description: 'Start the next run when this one finishes (leave on for continuous cover)'
         type: boolean
         default: true
   schedule:
     # A net, not the mechanism: if the chain ever breaks, this restarts it.
+    # Discord speed comes first while eBay's limit is 5,000 calls a day:
+    # a sweep every 35s is ~2,470 calls. When the 100k increase is approved,
+    # drop EVERY to 15 and restore the comps and deals schedules.
     - cron: '7,37 * * * *'
 
 concurrency:
@@ -35,7 +38,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -51,8 +54,8 @@ jobs:
           EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           PROBE: ${{ github.event.inputs.probe || 'false' }}
-          MINUTES: ${{ github.event.inputs.minutes || '25' }}
-          EVERY: ${{ github.event.inputs.every || '90' }}
+          MINUTES: ${{ github.event.inputs.minutes || '50' }}
+          EVERY: ${{ github.event.inputs.every || '35' }}
           DISCORD_WEBHOOK_RETAIL: ${{ secrets.DISCORD_WEBHOOK_RETAIL }}
           DISCORD_WEBHOOK_MARKET: ${{ secrets.DISCORD_WEBHOOK_MARKET }}
           DISCORD_WEBHOOK_BEST: ${{ secrets.DISCORD_WEBHOOK_BEST }}

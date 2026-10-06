@@ -25,7 +25,9 @@ on:
     # Every 3 hours — 8 runs a day at 600 sets is 4,800 calls against eBay's
     # 5,000/day ceiling, so a full catalog cycle lands in about 2 days instead
     # of 4. Staggered off the hour to avoid peak API contention.
-    - cron: '20 1,4,7,10,13,16,19,22 * * *'
+    # Twice a day (was eight) to leave the eBay call budget to the fast lane.
+    # Restore '20 1,4,7,10,13,16,19,22 * * *' once the 100k limit is approved.
+    - cron: '20 4,16 * * *'
 
 jobs:
   collect:
