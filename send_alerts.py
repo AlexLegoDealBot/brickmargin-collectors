@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from supabase import create_client
 
-VERSION = "2.2-consent"
+VERSION = "2.3-logfix"
 
 MIN_SAMPLE = 5          # listings behind a reading, matching lib/movement.ts
 MAX_MOVE_PCT = 25       # above this it's an artefact, not a price move
@@ -422,9 +422,8 @@ def main():
         if not email or not prof.get("alert_email", True):
             continue
 
-        threshold = float(w.get("target_drop_pct") or prof.get("alert_drop_pct") or 5)
         w_by_set = {x["set_num"]: x for x in watches if x["user_id"] == uid}
-        items = []
+        items, user_rows = [], []
 
         for set_num in nums:
             val = values.get(set_num)
@@ -443,10 +442,13 @@ def main():
                         "detail": f"Now {usd(cur)} · your target was {usd(float(tp))}",
                         "figure": "Target hit", "colour": "#0b6b3a",
                     })
-                    sent_rows.append({"user_id": uid, "set_num": set_num, "kind": "target_price",
+                    user_rows.append({"user_id": uid, "set_num": set_num, "kind": "target_price",
                                       "detail": f"{usd(cur)} reached target {usd(float(tp))}"})
 
             # --- price move ---
+            # This set's own threshold, else the person's, else 5%.
+            threshold = float(w_by_set.get(set_num, {}).get("target_drop_pct")
+                              or prof.get("alert_drop_pct") or 5)
             if prof.get("alert_price", True):
                 rows = history.get(set_num, [])
                 if len(rows) >= 2:
@@ -465,7 +467,7 @@ def main():
                                     "figure": f"{'▼' if down else '▲'} {abs(pct):.1f}%",
                                     "colour": "#a8342a" if down else "#0b6b3a",
                                 })
-                                sent_rows.append({
+                                user_rows.append({
                                     "user_id": uid, "set_num": set_num,
                                     "kind": "price_drop",
                                     "detail": f"{pct:.1f}% to {usd(now_v)}",
@@ -490,7 +492,7 @@ def main():
                         "buy_url": affiliate(d.get("item_url")),
                         "image_url": (d.get("image_url") or "").replace("/s-l225.", "/s-l500."),
                     })
-                    sent_rows.append({
+                    user_rows.append({
                         "user_id": uid, "set_num": set_num, "kind": "deal",
                         "detail": off, "value_at": round(float(d["total_price"]), 2)})
                     continue
@@ -509,13 +511,14 @@ def main():
                             "figure": usd(val.get("market_value") or 0),
                             "colour": "#9a6b12",
                         })
-                        sent_rows.append({
+                        user_rows.append({
                             "user_id": uid, "set_num": set_num, "kind": "retiring",
                             "detail": f"{days} days", "value_at": None})
 
         if not items:
             continue
         items = items[:MAX_PER_EMAIL]
+        user_rows = user_rows[:MAX_PER_EMAIL]   # appended in step with items
 
         subject = (f"{items[0]['name']} {items[0]['figure']}"
                    if len(items) == 1
@@ -528,10 +531,15 @@ def main():
             log(f"  WOULD SEND to {email}: {subject}")
             for it in items:
                 log(f"      {it['name']} — {it['detail']} ({it['figure']})")
+            sent_rows.extend(user_rows)
         else:
             if send_email(email, subject, html, text, unsub):
                 emails += 1
+                sent_rows.extend(user_rows)
                 log(f"  sent to {email}: {subject}")
+            else:
+                # Not logged, so the cooldown doesn't swallow it: next run tries again.
+                log(f"  NOT logged for {email}: the send failed, so it will be retried next run")
 
     if PROBE:
         log(f"  PROBE — {len(sent_rows)} alerts would go out, nothing sent or logged")
