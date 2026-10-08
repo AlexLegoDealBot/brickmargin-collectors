@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.2-advent"
+VERSION = "2.4-check"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -70,6 +70,16 @@ BEST_BIG_SAVING = float(os.environ.get("BEST_BIG_SAVING") or 150)
 BEST_BIG_MIN_PCT = float(os.environ.get("BEST_BIG_MIN_PCT") or 20)
 BEST_ROLE_ID = (os.environ.get("DISCORD_BEST_ROLE_ID") or "").strip()   # optional: ping a role
 
+# #too-good-to-be-true: listings priced so far under normal that they fail the
+# price gates below. Over three weeks that was about four a day — mostly
+# parts, knock-offs and scams, but roughly one in six a genuine steal (a
+# sealed Batmobile 76224 at $27). Rather than hide them, they go to their own
+# clearly labelled room: the deal rooms stay clean, and members who like long
+# shots can follow this one. Off unless the webhook secret is set. Never
+# written to the website, never pings anyone.
+HOOK_CHECK = (os.environ.get("DISCORD_WEBHOOK_CHECK") or "").strip()
+CHECK_DAILY_CAP = int(os.environ.get("CHECK_DAILY_CAP") or 15)
+
 def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${float(n):,.2f}"
 
@@ -79,6 +89,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from collect_deals import (                      # noqa: E402
     is_relevant, shipping_cost, condition_of, description_rejects,
     MIN_FEEDBACK, MIN_FEEDBACK_COUNT,
+    # The fast lane skipped these four and posted single bags, sails and
+    # advent pieces to #best-deals as 70-92% off. Same gates as the slow lane.
+    looks_partial, new_is_sealed, REQUIRE_SEALED_NEW, MAX_DISCOUNT, MSRP_FLOOR_NEW,
 )
 
 EBAY = "https://api.ebay.com"
@@ -105,15 +118,16 @@ def newest(tok, limit=200):
         log(f"  HTTP {r.status_code}"); return []
     return r.json().get("itemSummaries", []) or []
 
-def affiliate(url: str) -> str:
-    """Every link out earns, wherever it is posted."""
+def affiliate(url: str, custom: str = "discord") -> str:
+    """Every link out earns, wherever it is posted. `custom` shows up in the
+    eBay Partner Network reports, so each room's sales can be told apart."""
     if not url or not CAMPAIGN:
         return url
     try:
         from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
         u = urlparse(url); q = dict(parse_qsl(u.query))
         q.update({"mkevt": "1", "mkcid": "1", "mkrid": "711-53200-19255-0",
-                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001", "customid": "discord"})
+                  "siteid": "0", "campid": CAMPAIGN, "toolid": "10001", "customid": custom})
         return urlunparse(u._replace(query=urlencode(q)))
     except Exception:
         return url
@@ -269,10 +283,92 @@ def announce(d, client):
         log(f"    discord failed: {str(exc)[:80]}")
 
 
+def check_room_has_space(client):
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
+    try:
+        n = (client.table("discord_posts").select("item_id", count="exact")
+             .gte("check_at", today).execute()).count or 0
+        return n < CHECK_DAILY_CAP
+    except Exception:
+        return False                 # can't count — don't risk a flood
+
+
+def flag_for_check(d, why, tok, client):
+    """
+    A listing that failed ONLY on price, posted to #too-good-to-be-true with
+    a warning instead of being dropped. It has already passed every content
+    gate (whole set, sealed, real seller); the description is read first like
+    any deal. Not written to the deals table, so the website never shows it.
+    Remembered in discord_posts, so it is posted once.
+    """
+    if not HOOK_CHECK or PROBE:
+        return
+    try:
+        if (client.table("discord_posts").select("item_id")
+                .eq("item_id", d["item_id"]).limit(1).execute()).data:
+            return
+    except Exception:
+        return                       # can't tell whether it was posted — skip
+    if not check_room_has_space(client):
+        log(f"    #too-good-to-be-true is at {CHECK_DAILY_CAP} for today — not posted")
+        return
+    flag = description_rejects(d["item_id"], tok)
+    if flag:
+        log(f"    too-good listing skipped — description says \"{flag}\"")
+        return
+
+    link = affiliate(d["item_url"], "discord-check")
+    seller = d.get("seller") or "—"
+    if d.get("feedback_pct"):
+        seller += f" ({float(d['feedback_pct']):.1f}% positive)"
+    embed = {
+        # EPN: every eBay link says it goes to eBay — author line, title, labelled link
+        "author": {"name": "⚠️ Check before you buy · eBay listing",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "title": ((d.get("set_name") or d["title"])[:200] + " — View on eBay"),
+        "url": link,
+        "description": (
+            f"**[See it on eBay →]({link})**\n"
+            f"## {usd(d['total_price'])}  ·  {why}\n"
+            "A price this far under normal is usually a part, a knock-off or a scam — "
+            "and now and then a real steal. Read the description, check the photos "
+            "and the seller's feedback before you buy.\n\n"
+            f"*{d['title'][:140]}*"
+        ),
+        "color": 0x9AA0A6,
+        "fields": [
+            {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
+            {"name": "Usually sells for", "value": usd(d["market_value"]) if d.get("market_value") else "—", "inline": True},
+            {"name": "Seller", "value": seller, "inline": True},
+            {"name": "Set page", "value": f"[{d['set_num'].split('-')[0]} on BrickMargin](https://www.brickmargin.com/set/{d['set_num']})", "inline": True},
+        ],
+        "footer": {"text": "Affiliate link to eBay: BrickMargin may earn a commission if you buy",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if d.get("image_url"):
+        embed["image"] = {"url": big_image(d["image_url"])}
+    try:
+        r = HTTP.post(HOOK_CHECK, json={"embeds": [embed], "username": "BrickMargin",
+                                        "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png",
+                                        "allowed_mentions": {"parse": []}}, timeout=20)
+        if r.status_code < 300:
+            client.table("discord_posts").upsert(
+                {"item_id": d["item_id"], "set_num": d["set_num"],
+                 "check_at": datetime.now(timezone.utc).isoformat()}, on_conflict="item_id").execute()
+            log(f"  ⚠ {d['title'][:44]:46} {usd(d['total_price']):>10}  → #too-good-to-be-true ({why})")
+            time.sleep(1.2)          # Discord rate-limits webhooks
+        else:
+            log(f"    too-good HTTP {r.status_code}")
+    except Exception as exc:
+        log(f"    too-good post failed: {str(exc)[:80]}")
+
+
 def main():
     log(f"BrickMargin fast lane — version {VERSION}  probe={PROBE}  {MINUTES}m at {EVERY}s")
     log(f"  discord: retail={'set' if HOOK_RETAIL else 'MISSING'} · "
-        f"resale={'set' if HOOK_MARKET else 'MISSING'} · best={'set' if HOOK_BEST else 'off'} · post score >= {MIN_POST_SCORE}")
+        f"resale={'set' if HOOK_MARKET else 'MISSING'} · best={'set' if HOOK_BEST else 'off'} · "
+        f"too-good={'set' if HOOK_CHECK else 'off'} · post score >= {MIN_POST_SCORE}")
     client = create_client(SB_URL, SB_KEY)
 
     # The catalogue, once, in memory. A set number appearing in a title is
@@ -316,6 +412,10 @@ def main():
             # sealed only, same as the slow lane
             if (condition_of(item) or "").lower() != "new":
                 continue
+            if looks_partial(title, row.get("name")):      # "bag #9", "floor 2", "figures only"
+                continue
+            if REQUIRE_SEALED_NEW and not new_is_sealed(title):   # a whole set says it's sealed
+                continue
 
             ship = shipping_cost(item)
             if ship is None:
@@ -331,6 +431,31 @@ def main():
             value = float(row["sold_new"]) if row.get("sold_new") and (row.get("sold_new_qty") or 0) >= 3 else float(row["market_value"])
             msrp = float(row["msrp"]) if row.get("msrp") else None
             in_production = not row.get("retired_at")
+
+            # Too good to be the set — usually it isn't the set. The same
+            # ceiling and floors the slow lane uses: under 45% of retail, or
+            # more than MAX_DISCOUNT% under what it's worth, stays out of the
+            # deal rooms and off the website. It goes to #too-good-to-be-true
+            # with a warning instead, if that room is set up.
+            too_good = None
+            if value and (1 - total / value) * 100 > MAX_DISCOUNT:
+                too_good = f"{(1 - total / value) * 100:.0f}% under what it usually sells for"
+            elif msrp and total < msrp * MSRP_FLOOR_NEW:
+                too_good = f"{(1 - total / msrp) * 100:.0f}% under retail"
+            elif not msrp and value and total < value * 0.48:
+                too_good = f"{(1 - total / value) * 100:.0f}% under what it usually sells for"
+            if too_good:
+                if HOOK_CHECK and not PROBE:
+                    flag_for_check({
+                        "item_id": str(item.get("itemId")), "set_num": row["set_num"],
+                        "set_name": row.get("name"), "title": title[:200],
+                        "total_price": round(total, 2), "msrp": msrp, "market_value": value,
+                        "seller": seller.get("username"),
+                        "feedback_pct": float(seller.get("feedbackPercentage") or 0),
+                        "image_url": (item.get("image") or {}).get("imageUrl"),
+                        "item_url": item.get("itemWebUrl", ""),
+                    }, too_good, tok, client)
+                continue
 
             # in-production sets are judged against retail, retired against resale
             if in_production and msrp:

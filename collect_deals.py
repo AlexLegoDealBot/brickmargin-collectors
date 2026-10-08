@@ -64,7 +64,7 @@ HTTP.mount("https://", HTTPAdapter(
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
-VERSION = "4.5-advent"
+VERSION = "4.7-strict"
 
 EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -286,6 +286,34 @@ JUNK = (
 )
 
 
+# Junk terms match as whole words (a plural "s" allowed), never as fragments.
+# As bare substrings they silently blocked 161 real sets by their own names:
+# "pen" inside Penguin, "part" inside Party and Apartment, "spare" inside
+# Transparent, "knock" inside Knockturn Alley, "magnet" inside Magneto,
+# "clone" inside Cyclone. A few words the fragments used to catch are listed
+# outright so nothing that was blocked for a real reason gets through.
+JUNK = JUNK + ("customized", "customised", "magnetic", "bundled", "partially",
+               "stickered", "partout", "parted out")
+_JUNK_RX = tuple((bad, re.compile(rf"(?<![a-z0-9]){re.escape(bad)}s?(?![a-z0-9])"))
+                 for bad in JUNK)
+
+
+def junk_term(t, set_name=None, theme=None):
+    """
+    The first junk term in a lower-cased title, or None.
+
+    A term that is part of the set's own name or theme is the product, not
+    junk: "Clone" in 501st Legion Clone Troopers, "Charger" in Dodge Charger
+    R/T, "Minifigure" in Collectible Minifigures, "Loose" in Dilophosaurus on
+    the Loose. Every Clone Trooper battle pack was being dropped on that word.
+    """
+    own = f"{set_name or ''} {theme or ''}".lower()
+    for bad, rx in _JUNK_RX:
+        if rx.search(t) and not rx.search(own):
+            return bad
+    return None
+
+
 NAME_STOP = {
     "the", "and", "of", "a", "an", "with", "set", "lego", "for", "from",
     "edition", "collection", "series", "pack", "mini", "large", "small",
@@ -328,6 +356,38 @@ def is_advent_piece(title):
     return "advent" in t and any(re.search(p, t) for p in ADVENT_PIECE)
 
 
+def lifted_from_set(t, num, tokens, set_name=None):
+    """
+    "Cloth Sails Set Of 6 From Pirates of Barracuda Bay (21322)" is the sails,
+    not the ship. When "from" comes BEFORE the set's number, and what sits
+    between them is the set's own name (or just "lego set #"), the listing is
+    something taken out of the set. A whole set says "from" after it, if at
+    all: "75192 Millennium Falcon, from a smoke-free home".
+
+    Two "from"s that are part of a name, not a source:
+      - the set's own name: "Time Machine from Back to the Future" (77256),
+        "Escape from the Lost Tomb" (77013) — nine sets in the catalogue;
+      - "Spider-Man: Far From Home", the film three sets are named after.
+        A sealed Molten Man Battle (76128) was held back on it.
+    """
+    if re.search(r"\bfrom\b", (set_name or "").lower()):
+        return False
+    m = re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t)
+    if not m:
+        return False
+    for f in re.finditer(r"\bfrom\b", t[:m.start()]):
+        if re.search(r"\bfar\s*$", t[:f.start()]):
+            continue
+        between = t[f.end():m.start()]
+        if len(between) > 60:
+            continue
+        if any(tok in between for tok in tokens):
+            return True
+        if re.fullmatch(r"[\s#:(\-]*(lego)?[\s#:(\-]*(set)?[\s#:(\-]*", between):
+            return True
+    return False
+
+
 def is_relevant(title, num, set_name=None, theme=None):
     """
     The listing must plausibly BE the set.
@@ -348,19 +408,23 @@ def is_relevant(title, num, set_name=None, theme=None):
     if not re.search(rf"(?<!\d){re.escape(num)}(?!\d)", t):
         return False, "number missing"
 
-    for bad in JUNK:
-        if bad in t:
-            return False, bad
+    bad = junk_term(t, set_name, theme)
+    if bad:
+        return False, bad
 
     # A seller shouting READ, or admitting "as-is", is telling us something
     # is wrong with this particular copy. Honour it.
     if has_caveat(t):
         return False, "seller says something is missing"
 
-    if sold_for_another_set(t, num):
+    # ...unless "for" is in the set's own name: "Drone Search for Mythical
+    # Mew" (72161), "The Ultimate Battle for Asgard" (76084).
+    if sold_for_another_set(t, num) and not re.search(r"\bfor\b", (set_name or "").lower()):
         return False, "an accessory sold FOR this set, not the set"
 
     tokens = name_tokens(set_name, theme)
+    if lifted_from_set(t, num, tokens, set_name):
+        return False, "a piece taken from the set, not the set"
     if tokens:
         hits = sum(1 for tok in tokens if tok in t)
         if hits == 0:
@@ -386,7 +450,8 @@ SEALED_WORDS = (
 
 # Floors and levels of a modular, in every phrasing a seller might use.
 PART_PATTERNS = (
-    r"\b(floor|level|story|storey|section|module|tier)\s*#?\s*\d\b",
+    # ("Toy Story 4" is a film, not the fourth storey of something)
+    r"\b(floor|level|(?<!toy )story|storey|section|module|tier)\s*#?\s*\d\b",
     r"\b\d\s*(st|nd|rd|th)?\s*(floor|level|story|storey|section)\b",
     r"\b(top|middle|bottom|upper|lower|ground|first|second|third)\s+"
     r"(floor|level|story|storey|section|half|part)\b",
@@ -401,7 +466,8 @@ PART_PATTERNS = (
     # "Moff Gideon w/ Darksaber from 75456" — a single figure lifted out of a
     # set. "for <number>" was already caught; "from" and "out of" were not,
     # and they are the commoner phrasings.
-    r"\b(from|out\s+of|off\s+of)\s+(lego\s+)?(set\s+)?#?\s*\d{4,7}\b",
+    # ...but not a year: "Rey & Kylo Ren (41489) from 2017 RARE!" is the set.
+    r"\b(from|out\s+of|off\s+of)\s+(lego\s+)?(set\s+)?#?\s*(?!(?:19|20)\d\d\b)\d{4,7}\b",
     r"\bsplit\s+from\b",
     # a figure named with its accessories and no set is a figure, not a set
     r"\bw\/?\s*(darksaber|lightsaber|helmet|blaster|cape|weapon)s?\b",
@@ -542,9 +608,17 @@ def description_rejects(item_id, token):
     return None
 
 
-def looks_partial(title):
-    """Catches the phrasings a plain word list misses."""
+def looks_partial(title, set_name=None):
+    """
+    Catches the phrasings a plain word list misses. The set's own name is
+    taken out of the title first: "APXGP Team Race Car from F1 The Movie"
+    (77252) is the set, not a car lifted from one, and "Portal 2 Level Pack"
+    is not level 2 of anything.
+    """
     t = (title or "").lower()
+    name = (set_name or "").lower().strip()
+    if len(name) >= 6:
+        t = t.replace(name, " ")
     return any(re.search(pat, t) for pat in PART_PATTERNS)
 
 
@@ -680,7 +754,7 @@ def evaluate(item, set_row):
     cond = condition_of(item)
     if cond is None:
         return None
-    if looks_partial(title):
+    if looks_partial(title, set_row.get("name")):
         return reject("partial build")
     if cond == "used" and not used_is_complete(title):
         return reject("used: no completeness claim")

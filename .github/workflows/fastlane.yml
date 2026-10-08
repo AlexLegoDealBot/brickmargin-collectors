@@ -61,6 +61,8 @@ jobs:
           DISCORD_WEBHOOK_BEST: ${{ secrets.DISCORD_WEBHOOK_BEST }}
           DISCORD_BEST_ROLE_ID: ${{ secrets.DISCORD_BEST_ROLE_ID }}
           DISCORD_THEME_ROLES: ${{ secrets.DISCORD_THEME_ROLES }}
+          # #too-good-to-be-true. Leave the secret unset and the room stays off.
+          DISCORD_WEBHOOK_CHECK: ${{ secrets.DISCORD_WEBHOOK_CHECK }}
           EBAY_CAMPAIGN_ID: '5339178457'
           MIN_POST_SCORE: '4.0'
         run: python watch_new.py
