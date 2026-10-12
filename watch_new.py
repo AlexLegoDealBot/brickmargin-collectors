@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.4-check"
+VERSION = "2.5-oldsets"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -373,12 +373,15 @@ def main():
 
     # The catalogue, once, in memory. A set number appearing in a title is
     # what makes the match, so this is a dictionary lookup, not a query.
+    # The ceiling was 12,000 rows; with sets back to 1999 the valued
+    # catalogue heads past that, and anything beyond it was silently never
+    # matched. Ordered, so the pages can't overlap or skip.
     rows = []
-    for start in range(0, 12000, 1000):
+    for start in range(0, 60000, 1000):
         batch = (client.table("set_values")
                  .select("set_num,name,theme,msrp,market_value,comp_count,retired_at,sold_new,sold_new_qty,pieces")
                  .eq("is_accessory", False).not_.is_("market_value", "null")
-                 .range(start, start + 999).execute()).data or []
+                 .order("set_num").range(start, start + 999).execute()).data or []
         rows.extend(batch)
         if len(batch) < 1000: break
     by_number = {}
@@ -399,13 +402,18 @@ def main():
 
         for item in fresh:
             title = item.get("title", "")
-            # a set number in the title is the only cheap way to match
-            nums = re.findall(r"(?<!\d)(\d{4,7})(?!\d)", title)
-            row = next((by_number[n] for n in nums if n in by_number), None)
+            # A set number in the title is the only cheap way to match. Try
+            # every number in it, not just the first: with older sets in the
+            # catalogue, a year ("LEGO 2022 Technic Ford GT 42154") or a piece
+            # count can also be an old four-digit set, and stopping at the
+            # first hit skipped the set the listing is actually for.
+            row = None
+            for n in re.findall(r"(?<!\d)(\d{4,7})(?!\d)", title):
+                cand = by_number.get(n)
+                if cand and is_relevant(title, n, cand.get("name"), cand.get("theme"))[0]:
+                    row = cand
+                    break
             if not row: continue
-
-            keep, _ = is_relevant(title, row["set_num"].split("-")[0], row.get("name"), row.get("theme"))
-            if not keep: continue
 
             try: price = float(item["price"]["value"])
             except Exception: continue
