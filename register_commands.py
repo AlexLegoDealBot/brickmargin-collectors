@@ -14,7 +14,7 @@ Environment: DISCORD_APP_ID     Developer Portal → General Information → App
 import os, sys
 import requests
 
-VERSION = "1.0"
+VERSION = "1.2"
 
 APP_ID = (os.environ.get("DISCORD_APP_ID") or "").strip()
 TOKEN = (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
@@ -26,17 +26,20 @@ GUILD_ONLY = {"contexts": [0], "integration_types": [0]}      # only inside a se
 COMMANDS = [
     {"name": "price", "description": "What a LEGO set is worth, and the best deal on it right now",
      "options": [SET], **GUILD_ONLY},
+    # Three subcommands, so each one shows exactly the boxes it needs (all
+    # required). Version 1.0 had one /track with optional price and percent
+    # boxes that Discord hides behind "+ more": people picked "At or under a
+    # price" and then had nowhere to type it. Amounts are text, so "$650",
+    # "1,200" and "25%" all work; the bot reads them.
     {"name": "track", "description": "Get pinged when a set hits your price",
      "options": [
-         SET,
-         {"type": 3, "name": "alert", "description": "When should I ping you?", "required": True,
-          "choices": [{"name": "Any deal", "value": "any"},
-                      {"name": "At or under a price", "value": "price"},
-                      {"name": "At least a % off", "value": "percent"}]},
-         {"type": 10, "name": "price", "description": "Your price in dollars (for 'At or under a price')",
-          "required": False, "min_value": 1},
-         {"type": 4, "name": "percent", "description": "Minimum % off (for 'At least a % off')",
-          "required": False, "min_value": 5, "max_value": 90},
+         {"type": 1, "name": "price", "description": "Ping me when a set is at or under my price",
+          "options": [SET, {"type": 3, "name": "max", "description": "Your price in dollars, like 650",
+                            "required": True, "max_length": 12}]},
+         {"type": 1, "name": "percent", "description": "Ping me when a set is at least this % off",
+          "options": [SET, {"type": 3, "name": "off", "description": "Percent off, from 5 to 90, like 25",
+                            "required": True, "max_length": 10}]},
+         {"type": 1, "name": "any", "description": "Ping me for any deal on a set", "options": [SET]},
      ], **GUILD_ONLY},
     {"name": "tracks", "description": "Show the sets you're tracking", **GUILD_ONLY},
     {"name": "untrack", "description": "Stop tracking a set",
@@ -59,8 +62,12 @@ def main():
     if r.status_code >= 300:
         sys.exit(f"ERROR: Discord answered {r.status_code}: {r.text[:300]}")
     print("Registered: " + ", ".join("/" + c["name"] for c in r.json()))
-    print("\nAdd the bot to your server — open this link and pick the BrickMargin server:")
-    print(f"https://discord.com/oauth2/authorize?client_id={APP_ID}&scope=applications.commands%20bot&permissions=0")
+    # GitHub blanks out every secret's value in this log (it prints ***), and
+    # the Application ID is a secret here, so a ready-made link would arrive
+    # broken ("Invalid Form Body"). Print the link with a slot instead.
+    print("\nIf the bot isn't in your server yet: copy this link, replace YOUR_APP_ID with the Application ID")
+    print("(Developer Portal → General Information), open it and pick the BrickMargin server:")
+    print("https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=applications.commands%20bot&permissions=0")
 
 
 if __name__ == "__main__":

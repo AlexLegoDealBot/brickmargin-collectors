@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.6.1-marvel-dc"
+VERSION = "2.6.2-ninjago"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -190,7 +190,7 @@ THEME_CHANNEL = {
     "Star Wars": "star-wars", "Icons": "icons", "Technic": "technic", "Pokémon": "pokemon",
     "Botanicals": "botanicals", "Disney": "disney", "Harry Potter": "harry-potter",
     "Super Heroes Marvel": "marvel", "Super Heroes DC": "dc",
-    "LEGO Ideas and CUUSOO": "ideas",
+    "LEGO Ideas and CUUSOO": "ideas", "Ninjago": "ninjago",
 }
 THEME_ALIASES = {"other-themes": "other", "lego-ideas": "ideas", "super-heroes-marvel": "marvel", "super-heroes-dc": "dc"}
 THEME_HOOKS_ERROR = ""
