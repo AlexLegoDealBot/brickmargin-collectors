@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.6-themes-tracks"
+VERSION = "2.6.1-marvel-dc"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -172,7 +172,8 @@ def _key(s):
 
 
 try:
-    THEME_ROLES = {_key(k): str(v).strip() for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if v}
+    THEME_ROLES = {_key(k): str(v).strip() for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items()
+                   if str(v).strip().isdigit()}          # a role ID is digits; anything else is a placeholder
 except Exception:
     THEME_ROLES = {}
 THEME_MIN_PCT = float(os.environ.get("THEME_MIN_PCT") or 25)
@@ -188,10 +189,10 @@ THEME_MIN_SAVING = float(os.environ.get("THEME_MIN_SAVING") or 25)
 THEME_CHANNEL = {
     "Star Wars": "star-wars", "Icons": "icons", "Technic": "technic", "Pokémon": "pokemon",
     "Botanicals": "botanicals", "Disney": "disney", "Harry Potter": "harry-potter",
-    "Super Heroes Marvel": "superheroes", "Super Heroes DC": "superheroes",
+    "Super Heroes Marvel": "marvel", "Super Heroes DC": "dc",
     "LEGO Ideas and CUUSOO": "ideas",
 }
-THEME_ALIASES = {"other-themes": "other", "super-heroes": "superheroes", "lego-ideas": "ideas"}
+THEME_ALIASES = {"other-themes": "other", "lego-ideas": "ideas", "super-heroes-marvel": "marvel", "super-heroes-dc": "dc"}
 THEME_HOOKS_ERROR = ""
 try:
     THEME_HOOKS = {THEME_ALIASES.get(_key(k), _key(k)): str(v).strip()
