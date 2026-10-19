@@ -63,6 +63,10 @@ jobs:
           DISCORD_THEME_ROLES: ${{ secrets.DISCORD_THEME_ROLES }}
           # #too-good-to-be-true. Leave the secret unset and the room stays off.
           DISCORD_WEBHOOK_CHECK: ${{ secrets.DISCORD_WEBHOOK_CHECK }}
+          # Theme channels: JSON of channel key -> webhook URL. Unset = off.
+          DISCORD_THEME_WEBHOOKS: ${{ secrets.DISCORD_THEME_WEBHOOKS }}
+          # #set-alerts, where /track pings people. Unset = off.
+          DISCORD_WEBHOOK_ALERTS: ${{ secrets.DISCORD_WEBHOOK_ALERTS }}
           EBAY_CAMPAIGN_ID: '5339178457'
           MIN_POST_SCORE: '4.0'
         run: python watch_new.py

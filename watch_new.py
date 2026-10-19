@@ -30,7 +30,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-VERSION = "2.5-oldsets"
+VERSION = "2.6-themes-tracks"
 
 HTTP = requests.Session()
 HTTP.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -161,18 +161,63 @@ def is_best(d):
 # 2–3 for Disney or Icons, about one or fewer for the rest — useful, not
 # mutable. The secret is JSON mapping our theme names to Discord role IDs:
 #   {"Star Wars": "1234...", "Icons": "5678...", ...}
-import json as _json
+import json as _json, unicodedata as _ud
+
+
+def _key(s):
+    """These secrets are typed by hand: 'Pokémon', 'pokemon' and '#Pokemon '
+    must all mean the same thing, or a theme goes quiet and nobody can tell why."""
+    s = _ud.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
 try:
-    THEME_ROLES = {k: str(v) for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if v}
+    THEME_ROLES = {_key(k): str(v).strip() for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if v}
 except Exception:
     THEME_ROLES = {}
 THEME_MIN_PCT = float(os.environ.get("THEME_MIN_PCT") or 25)
 THEME_MIN_SAVING = float(os.environ.get("THEME_MIN_SAVING") or 25)
 
+# Theme channels: one per theme, in their own Themes category. Every deal
+# still goes to under-retail / under-resale for people who browse
+# everything; it ALSO goes to its theme's channel, and the theme role's ping
+# moves there, so the browse rooms stop pinging. The secret is JSON mapping
+# a channel key to that channel's webhook URL:
+#   {"star-wars": "https://discord.com/api/webhooks/...", "technic": "...", "other": "..."}
+# A theme with no channel of its own goes to "other" if there is one.
+THEME_CHANNEL = {
+    "Star Wars": "star-wars", "Icons": "icons", "Technic": "technic", "Pokémon": "pokemon",
+    "Botanicals": "botanicals", "Disney": "disney", "Harry Potter": "harry-potter",
+    "Super Heroes Marvel": "superheroes", "Super Heroes DC": "superheroes",
+    "LEGO Ideas and CUUSOO": "ideas",
+}
+THEME_ALIASES = {"other-themes": "other", "super-heroes": "superheroes", "lego-ideas": "ideas"}
+THEME_HOOKS_ERROR = ""
+try:
+    THEME_HOOKS = {THEME_ALIASES.get(_key(k), _key(k)): str(v).strip()
+                   for k, v in _json.loads(os.environ.get("DISCORD_THEME_WEBHOOKS") or "{}").items()
+                   if str(v).strip().startswith("https://")}
+except Exception as _exc:
+    THEME_HOOKS, THEME_HOOKS_ERROR = {}, f"DISCORD_THEME_WEBHOOKS is not valid JSON ({_exc})"
+THEME_HOOKS_UNKNOWN = sorted(set(THEME_HOOKS) - set(THEME_CHANNEL.values()) - {"other"})
+
+
+def theme_hook(theme):
+    """The webhook of this theme's channel, else the catch-all, else None."""
+    return THEME_HOOKS.get(THEME_CHANNEL.get(theme or "", "other")) or THEME_HOOKS.get("other")
+
+
+# /track alerts: members ask the bot to watch a set (at a price, at a % off,
+# or any deal) and get pinged here when a new listing meets it. The bot (on
+# the website) writes discord_tracks; this reads them every few minutes.
+HOOK_ALERTS = (os.environ.get("DISCORD_WEBHOOK_ALERTS") or "").strip()
+TRACK_COOLDOWN_HOURS = float(os.environ.get("TRACK_COOLDOWN_HOURS") or 12)
+TRACK_RELOAD_SECONDS = 300
+
 
 def theme_ping(d):
     """The role to ping for this deal, or None. Never more than one role."""
-    role = THEME_ROLES.get(d.get("theme") or "")
+    role = THEME_ROLES.get(_key(d.get("theme")))
     if not role:
         return None
     pct = float(d.get("pct_off_msrp") or d.get("discount_pct") or 0)
@@ -250,15 +295,25 @@ def announce(d, client):
         main = {"embeds": [embed], "username": "BrickMargin",
                 "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png"}
         role = theme_ping(d)
-        if role:
-            # mention only that one role — never @everyone, never anyone else
-            main["content"] = f"<@&{role}>"
-            main["allowed_mentions"] = {"parse": [], "roles": [role]}
+        th_hook = theme_hook(d.get("theme"))
+        # mention only that one role — never @everyone, never anyone else
+        ping = {"content": f"<@&{role}>", "allowed_mentions": {"parse": [], "roles": [role]}} if role else {}
+        if not th_hook:
+            main.update(ping)        # no theme channel for this theme: ping in the browse room, as before
         r = HTTP.post(target, json=main, timeout=20)
         if r.status_code < 300:
             client.table("discord_posts").upsert(
                 {"item_id": d["item_id"], "set_num": d["set_num"]}, on_conflict="item_id").execute()
             time.sleep(1.2)          # Discord rate-limits webhooks
+
+            # the same deal in its theme's channel, where the theme role is pinged
+            if th_hook:
+                rt = HTTP.post(th_hook, json={"embeds": [embed], "username": "BrickMargin",
+                                              "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png",
+                                              **(ping or {"allowed_mentions": {"parse": []}})}, timeout=20)
+                if rt.status_code >= 300:
+                    log(f"    theme channel HTTP {rt.status_code}")
+                time.sleep(1.2)
 
             if HOOK_BEST and is_best(d) and best_room_has_space(client):
                 best = {**embed, "author": {**embed["author"],
@@ -364,11 +419,117 @@ def flag_for_check(d, why, tok, client):
         log(f"    too-good post failed: {str(exc)[:80]}")
 
 
+def load_tracks(client):
+    """Every active /track, grouped by set number. A small table, read every few minutes."""
+    out, start = {}, 0
+    try:
+        while True:
+            rows = (client.table("discord_tracks")
+                    .select("id,discord_user_id,set_num,mode,target_price,target_pct,last_alert_at,last_alert_price,last_item_id")
+                    .eq("active", True).order("id").range(start, start + 999).execute()).data or []
+            for r in rows:
+                out.setdefault(r["set_num"], []).append(r)
+            if len(rows) < 1000:
+                break
+            start += 1000
+    except Exception as exc:
+        log(f"  tracks: could not load ({str(exc)[:80]}) — alerts paused until the next reload")
+    return out
+
+
+def track_wants(t, total, pct, is_deal, item_id, now):
+    """Does this listing meet this member's rule, and are they due a ping?"""
+    if t.get("last_item_id") == item_id:
+        return False
+    if t["mode"] == "price":
+        ok = t.get("target_price") is not None and total <= float(t["target_price"]) + 0.004
+    elif t["mode"] == "percent":
+        ok = t.get("target_pct") is not None and pct >= float(t["target_pct"])
+    else:                                  # "any": whatever our own deal bar calls a deal
+        ok = is_deal
+    if not ok:
+        return False
+    # one ping per set per 12 hours, unless the price has dropped again since
+    if t.get("last_alert_at"):
+        try:
+            age = (now - datetime.fromisoformat(str(t["last_alert_at"]).replace("Z", "+00:00"))).total_seconds() / 3600
+        except Exception:
+            age = TRACK_COOLDOWN_HOURS
+        lower = t.get("last_alert_price") is not None and total < float(t["last_alert_price"]) - 0.009
+        if age < TRACK_COOLDOWN_HOURS and not lower:
+            return False
+    return True
+
+
+def alert_trackers(hits, d, pct, vs_retail, tok, client):
+    """
+    Ping everyone whose /track this listing meets, in one message in the
+    alerts channel. The listing has passed every content and price-sanity
+    gate already; the description is read like any deal before anyone is
+    pinged. Mentions are limited to exactly those members.
+    """
+    flag = description_rejects(d["item_id"], tok)
+    if flag:
+        log(f"    track alert skipped — description says \"{flag}\"")
+        return
+    rule = lambda t: (f"{usd(t['target_price'])} or less" if t["mode"] == "price"
+                      else f"{float(t['target_pct']):.0f}%+ off" if t["mode"] == "percent" else "any deal")
+    users = list(dict.fromkeys(str(t["discord_user_id"]) for t in hits))[:90]
+    lines = [f"<@{u}> (your alert: {rule(next(t for t in hits if str(t['discord_user_id']) == u))})" for u in users]
+    link = affiliate(d["item_url"], "discord-track")
+    embed = {
+        "author": {"name": "🔔 Tracked set · eBay listing", "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "title": ((d.get("set_name") or d["title"])[:200] + " — View on eBay"),
+        "url": link,
+        "description": (f"**[Buy on eBay →]({link})**\n"
+                        f"## {usd(d['total_price'])}  ·  {pct:.0f}% under {'retail' if vs_retail else 'what it resells for'}\n"
+                        f"*{d['title'][:140]}*"),
+        "color": 0x00A3E0,
+        "fields": [
+            {"name": "Retail", "value": usd(d["msrp"]) if d.get("msrp") else "—", "inline": True},
+            {"name": "Resells for", "value": usd(d["market_value"]) if d.get("market_value") else "—", "inline": True},
+            {"name": "Seller", "value": d.get("seller") or "—", "inline": True},
+        ],
+        "footer": {"text": "Change or stop this alert with /track or /untrack · Affiliate link to eBay: BrickMargin may earn a commission if you buy",
+                   "icon_url": "https://www.brickmargin.com/brickmargin-round-512.png"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if d.get("image_url"):
+        embed["image"] = {"url": big_image(d["image_url"])}
+    try:
+        r = HTTP.post(HOOK_ALERTS, json={"content": "\n".join(lines)[:1900], "embeds": [embed],
+                                         "username": "BrickMargin",
+                                         "avatar_url": "https://www.brickmargin.com/brickmargin-round-512.png",
+                                         "allowed_mentions": {"parse": [], "users": users}}, timeout=20)
+        if r.status_code >= 300:
+            log(f"    track alert HTTP {r.status_code}")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for t in hits:
+            t.update(last_alert_at=now, last_alert_price=d["total_price"], last_item_id=d["item_id"])
+            try:
+                client.table("discord_tracks").update({"last_alert_at": now, "last_alert_price": d["total_price"],
+                                                       "last_item_id": d["item_id"]}).eq("id", t["id"]).execute()
+            except Exception as exc:
+                log(f"    track {t['id']}: could not record the alert ({str(exc)[:60]})")
+        log(f"  🔔 {d['title'][:44]:46} {usd(d['total_price']):>10}  → pinged {len(users)} tracker(s)")
+        time.sleep(1.2)
+    except Exception as exc:
+        log(f"    track alert failed: {str(exc)[:80]}")
+
+
 def main():
     log(f"BrickMargin fast lane — version {VERSION}  probe={PROBE}  {MINUTES}m at {EVERY}s")
     log(f"  discord: retail={'set' if HOOK_RETAIL else 'MISSING'} · "
         f"resale={'set' if HOOK_MARKET else 'MISSING'} · best={'set' if HOOK_BEST else 'off'} · "
         f"too-good={'set' if HOOK_CHECK else 'off'} · post score >= {MIN_POST_SCORE}")
+    log(f"  theme channels: {', '.join(sorted(THEME_HOOKS)) or 'off'} · "
+        f"track alerts: {'set' if HOOK_ALERTS else 'off'}")
+    if THEME_HOOKS_ERROR:
+        log(f"  WARNING: {THEME_HOOKS_ERROR} — theme channels are off until it's fixed")
+    if THEME_HOOKS_UNKNOWN:
+        log(f"  WARNING: DISCORD_THEME_WEBHOOKS names channels I don't post to: {', '.join(THEME_HOOKS_UNKNOWN)} "
+            f"— use: {', '.join(sorted(set(THEME_CHANNEL.values()) | {'other'}))}")
     client = create_client(SB_URL, SB_KEY)
 
     # The catalogue, once, in memory. A set number appearing in a title is
@@ -392,9 +553,15 @@ def main():
     tok = token(); seen = set(); posted = 0
     stop = datetime.now(timezone.utc) + timedelta(minutes=MINUTES)
     sweeps = 0
+    tracks_by_set, tracks_at = ({}, 0.0)
+    if HOOK_ALERTS:
+        tracks_by_set, tracks_at = load_tracks(client), time.monotonic()
+        log(f"  {sum(len(v) for v in tracks_by_set.values())} active /track alerts on {len(tracks_by_set)} sets")
 
     while datetime.now(timezone.utc) < stop:
         sweeps += 1
+        if HOOK_ALERTS and time.monotonic() - tracks_at > TRACK_RELOAD_SECONDS:
+            tracks_by_set, tracks_at = load_tracks(client), time.monotonic()   # pick up new /track requests
         items = newest(tok)
         fresh = [i for i in items if i.get("itemId") not in seen]
         for i in items: seen.add(i.get("itemId"))
@@ -464,6 +631,27 @@ def main():
                         "item_url": item.get("itemWebUrl", ""),
                     }, too_good, tok, client)
                 continue
+
+            # Someone asked to be pinged for this set. Checked BEFORE our own
+            # deal bar, because "$650 or less" can be a price we wouldn't
+            # call a deal; it has already passed every content and sanity gate.
+            watchers = tracks_by_set.get(row["set_num"])
+            if watchers and HOOK_ALERTS and not PROBE:
+                vs_retail = bool(in_production and msrp)
+                pct_now = (1 - total / msrp) * 100 if vs_retail else (1 - total / value) * 100
+                is_deal_now = total < msrp * 0.88 if vs_retail else total < value * 0.85
+                now_utc = datetime.now(timezone.utc)
+                hits = [t for t in watchers
+                        if track_wants(t, total, pct_now, is_deal_now, str(item.get("itemId")), now_utc)]
+                if hits:
+                    alert_trackers(hits, {
+                        "item_id": str(item.get("itemId")), "set_num": row["set_num"],
+                        "set_name": row.get("name"), "title": title[:200],
+                        "total_price": round(total, 2), "msrp": msrp, "market_value": value,
+                        "seller": seller.get("username"),
+                        "image_url": (item.get("image") or {}).get("imageUrl"),
+                        "item_url": item.get("itemWebUrl", ""),
+                    }, pct_now, vs_retail, tok, client)
 
             # in-production sets are judged against retail, retired against resale
             if in_production and msrp:

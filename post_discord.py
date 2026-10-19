@@ -12,11 +12,11 @@ New Webhook → Copy URL) and store it as DISCORD_WEBHOOK.
 Environment: SUPABASE_URL, SUPABASE_SERVICE_KEY, DISCORD_WEBHOOK
              MIN_SCORE (default 5.0), MAX_POSTS (default 8), PROBE (default true)
 """
-import os, sys, time
+import os, re, sys, time
 from datetime import datetime, timezone
 import requests
 
-VERSION = "2.6-totals"   # check this line after pasting
+VERSION = "2.7-fixes"   # check this line after pasting
 from supabase import create_client
 
 SB = os.environ.get("SUPABASE_URL", "").strip(); KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
@@ -54,7 +54,7 @@ def is_best(d):
 #   {"Star Wars": "1234...", "Icons": "5678...", ...}
 import json as _json
 try:
-    THEME_ROLES = {k: str(v) for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if v}
+    THEME_ROLES = {k: str(v).strip() for k, v in _json.loads(os.environ.get("DISCORD_THEME_ROLES") or "{}").items() if str(v).strip().isdigit()}
 except Exception:
     THEME_ROLES = {}
 THEME_MIN_PCT = float(os.environ.get("THEME_MIN_PCT") or 25)
@@ -105,10 +105,15 @@ def log(m): print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}", flush=True)
 usd = lambda n: f"${round(float(n)):,}"
 
 client = create_client(SB, KEY)
-posted = {r["item_id"] for r in (client.table("discord_posts").select("item_id").execute()).data or []}
 deals = (client.table("live_deals")
          .select("item_id,set_num,set_name,theme,image_url,total_price,market_value,msrp,pct_off_msrp,discount_pct,margin_pct,score,condition,seller,item_url,deal_type")
          .gte("score", MIN_SCORE).order("score", desc=True).limit(60).execute()).data or []
+# Ask about these 60 only. Reading the whole table returned just its first
+# 1,000 rows (of 5,000+), so anything posted later looked unposted — the
+# missing `import re` above was the only thing stopping hourly re-posts.
+ids = [d["item_id"] for d in deals]
+posted = {r["item_id"] for r in (client.table("discord_posts").select("item_id")
+                                  .in_("item_id", ids).execute()).data or []} if ids else set()
 fresh = [d for d in deals if d["item_id"] not in posted][:MAX_POSTS]
 log(f"{len(deals)} deals at or above {MIN_SCORE}; {len(fresh)} not yet posted")
 

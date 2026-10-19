@@ -1,0 +1,21 @@
+name: Register Discord commands
+
+# Run by hand once, after the Discord application exists. Tells Discord
+# about /price, /track, /tracks and /untrack, then prints the link that adds
+# the bot to the server.
+on:
+  workflow_dispatch:
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: pip install requests
+      - name: Register the commands
+        env:
+          DISCORD_APP_ID: ${{ secrets.DISCORD_APP_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+        run: python register_commands.py
