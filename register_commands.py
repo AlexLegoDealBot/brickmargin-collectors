@@ -4,8 +4,8 @@ BrickMargin · register the Discord slash commands
 =================================================
 
 Run once from the Actions tab ("Register Discord commands"), and again only
-if the commands change. It tells Discord about /price, /track, /tracks and
-/untrack; Discord then sends every use of them to
+if the commands change. It tells Discord about /price, /track, /tracks,
+/untrack and the staff-only /tracking; Discord then sends every use of them to
 https://www.brickmargin.com/api/discord/interactions, which answers them.
 
 Environment: DISCORD_APP_ID     Developer Portal → General Information → Application ID
@@ -14,7 +14,7 @@ Environment: DISCORD_APP_ID     Developer Portal → General Information → App
 import os, sys
 import requests
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 APP_ID = (os.environ.get("DISCORD_APP_ID") or "").strip()
 TOKEN = (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
@@ -42,6 +42,10 @@ COMMANDS = [
          {"type": 1, "name": "any", "description": "Ping me for any deal on a set", "options": [SET]},
      ], **GUILD_ONLY},
     {"name": "tracks", "description": "Show the sets you're tracking", **GUILD_ONLY},
+    # Staff only. "32" is Discord's Manage Server permission: members without it
+    # never see this command (the bot checks again when it runs).
+    {"name": "tracking", "description": "Staff only: what members are tracking and which alerts fired",
+     "default_member_permissions": "32", **GUILD_ONLY},
     {"name": "untrack", "description": "Stop tracking a set",
      "options": [{**SET, "description": "The set to stop tracking"}], **GUILD_ONLY},
 ]
