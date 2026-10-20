@@ -1,0 +1,35 @@
+name: Deal freshness
+
+# Every hour: re-check the deals people see first straight from eBay, and
+# retire anything sold, ended, repriced out of deal territory, or unconfirmed
+# for too long. Spends only eBay calls the fast lane won't need today.
+on:
+  workflow_dispatch:
+    inputs:
+      probe: { type: boolean, default: true }
+  schedule:
+    - cron: '23 * * * *'
+
+concurrency:
+  group: freshness
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          PROBE: ${{ github.event.inputs.probe || 'false' }}
+          MAX_CHECKS: '25'
+          CHECK_AFTER_HOURS: '6'
+          FAST_EXPIRE_HOURS: '24'
+        run: python check_deals.py
